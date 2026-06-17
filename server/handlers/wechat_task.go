@@ -52,6 +52,11 @@ type WechatTask struct {
 	Expired     bool       `json:"expired"`
 	Bound       bool       `json:"bound,omitempty"`
 	Error       string     `json:"error,omitempty"`
+	// SyncError:openclaw 配置同步(bot IDs → bindings/accounts)的错误信息。
+	// 仅在 sync 失败时非空。sync 失败不影响 Bound=true 的设置(openclaw 已连上微信)，
+	// 但日志 + 这个字段会让运维知道"配置没同步,需要人工处理"。
+	// omitempty:成功时不出现在 JSON 响应里,前端看不到噪音。
+	SyncError   string     `json:"sync_error,omitempty"`
 	CompletedAt time.Time  `json:"-"`
 	cancel      context.CancelFunc
 }

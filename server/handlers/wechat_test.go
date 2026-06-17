@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -641,11 +643,11 @@ func TestPostWechatBind_ConcurrentTasks(t *testing.T) {
 	api := r.Group("/api")
 	// 同一个 handler 工厂接受不同 commands 是不行的(闭包已固定),所以建 3 个 handler
 	// 共享同一个 task store(由 handler 内部 GetWechatTaskStore 拿到),互不干扰。
-	api.POST("/wechat/bind", PostWechatBind([][]string{cmds[0]}, 5*time.Second))
+	api.POST("/wechat/bind", PostWechatBind([][]string{cmds[0]}, 5*time.Second, ""))
 	api.GET("/wechat/bind/:task_id", GetWechatBindStatus())
-	api.POST("/wechat/bind2", PostWechatBind([][]string{cmds[1]}, 5*time.Second))
+	api.POST("/wechat/bind2", PostWechatBind([][]string{cmds[1]}, 5*time.Second, ""))
 	api.GET("/wechat/bind2/:task_id", GetWechatBindStatus())
-	api.POST("/wechat/bind3", PostWechatBind([][]string{cmds[2]}, 5*time.Second))
+	api.POST("/wechat/bind3", PostWechatBind([][]string{cmds[2]}, 5*time.Second, ""))
 	api.GET("/wechat/bind3/:task_id", GetWechatBindStatus())
 
 	// 三个 POST 都立刻拿 task_id
@@ -822,17 +824,29 @@ func TestWechatTaskStore_IDsUnique(t *testing.T) {
 // resetWechatStore 每个异步测试前重置 store 单例,避免污染。
 // 注意:旧 store 的后台清理 goroutine 还在跑,但它引用的 sync.Map 已被 GC(因为没人引用了),
 // ticker 会空转直到进程结束;测试用 t.Cleanup 不杀它(无影响,且新 store 会启动新的 ticker)。
+//
+// 同时把 openclawConfigSyncDelay 重置为 0:大多数测试不关心 sync 流程,默认让 sync 立即跑
+// (且 baseDir="" → sync 失败但不影响 Bound=true 的设置,行为跟改造前一致)。
 func resetWechatStore(t *testing.T) {
 	t.Helper()
 	ResetWechatTaskStoreForTest()
+	openclawConfigSyncDelay = 0
 }
 
+// newWechatEngine 默认 baseDir=""; sync 会跑但失败,Bound=true 仍立即置位(适合不关心 sync 的测试)。
 func newWechatEngine(t *testing.T, commands [][]string, timeout time.Duration) *gin.Engine {
+	t.Helper()
+	return newWechatEngineWithBaseDir(t, commands, timeout, "")
+}
+
+// newWechatEngineWithBaseDir 是带 baseDir 的版本,供新加的 sync 集成测试用
+// (用临时目录装 accounts.json / openclaw.json mock)。
+func newWechatEngineWithBaseDir(t *testing.T, commands [][]string, timeout time.Duration, baseDir string) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	api := r.Group("/api")
-	api.POST("/wechat/bind", PostWechatBind(commands, timeout))
+	api.POST("/wechat/bind", PostWechatBind(commands, timeout, baseDir))
 	api.GET("/wechat/bind/:task_id", GetWechatBindStatus())
 	api.POST("/wechat/bind/:task_id/cancel", PostWechatBindCancel())
 	return r
@@ -882,4 +896,213 @@ func pollWechatTaskAtPath(t *testing.T, r *gin.Engine, path string, maxAttempts 
 	}
 	t.Fatalf("轮询 %d 次仍未到终态,最后 body=%v", maxAttempts, lastBody)
 	return lastBody
+}
+
+// ===== 集成测试:bound → sync openclaw.json → Bound=true =====
+//
+// 这些测试验证 runWechatBindTask 检测到 bound 标记后,会异步触发 syncOpenclawConfig,
+// 并把新 bot IDs 写到 mock openclaw.json。测试用 newWechatEngineWithBaseDir + t.TempDir
+// 隔离真实 BASE_DIR。
+
+// TestPostWechatBind_BoundTriggersSyncAndWritesConfig 完整链路:
+// bound marker 被 scanner 检测 → 等 openclawConfigSyncDelay → 调 syncOpenclawConfig
+// → 把新 bot 写到 mock openclaw.json → Bound=true。
+// 这是"扫码成功后自动同步"的核心契约。
+func TestPostWechatBind_BoundTriggersSyncAndWritesConfig(t *testing.T) {
+	resetWechatStore(t)
+	// syncDelay 设短一些(50ms)让测试快,但确保 > pollWechatTask 的 poll 间隔,避免
+	// poll 一返回就检查 bound 而 sync 还没跑的竞态。
+	openclawConfigSyncDelay = 50 * time.Millisecond
+	t.Cleanup(func() { openclawConfigSyncDelay = 0 })
+
+	baseDir := mockOpenclawConfig(t,
+		`["fresh-bot-im-bot", "fresh-bot2-im-bot"]`,
+		sampleOpenclawConfig,
+	)
+	r := newWechatEngineWithBaseDir(t, boundCmd(), 5*time.Second, baseDir)
+
+	postResp := postWechatBind(t, r)
+	if postResp.Code != http.StatusAccepted {
+		t.Fatalf("POST want 202, got %d", postResp.Code)
+	}
+	taskID, _ := decodeBody(t, postResp)["task_id"].(string)
+
+	// 轮询等终态(boundCmd 走 exec 0 → status=done,bound marker 触发 sync 异步进行)
+	final := pollWechatTask(t, r, taskID, 50, 20*time.Millisecond)
+	if final["status"] != string(StatusDone) {
+		t.Fatalf("status = %v, want done; body=%v", final["status"], final)
+	}
+
+	// 等 sync 完成(50ms delay + sync IO + buffer)
+	time.Sleep(200 * time.Millisecond)
+
+	// 直接从 store 拿最新 snapshot(绕过 GET handler),确保 bound=true 已写入
+	snap, ok := GetWechatTaskStore().GetSnapshot(taskID)
+	if !ok {
+		t.Fatal("task not found after sync")
+	}
+	if !snap.Bound {
+		t.Errorf("bound = false, want true (sync 应已完成): snap=%+v", snap)
+	}
+	if snap.SyncError != "" {
+		t.Errorf("sync_error = %q, want empty (sync 应成功)", snap.SyncError)
+	}
+
+	// 关键断言:mock openclaw.json 已被 sync 写入了新 bot
+	cfg := readOpenclawJSON(t, baseDir)
+	bindings, _ := cfg["bindings"].([]any)
+	if !hasOpenclawWeixinBinding(bindings, "fresh-bot-im-bot") {
+		t.Errorf("fresh-bot-im-bot 未被加到 bindings: %v", bindings)
+	}
+	if !hasOpenclawWeixinBinding(bindings, "fresh-bot2-im-bot") {
+		t.Errorf("fresh-bot2-im-bot 未被加到 bindings: %v", bindings)
+	}
+	channels, _ := cfg["channels"].(map[string]any)
+	ow, _ := channels["openclaw-weixin"].(map[string]any)
+	accounts, _ := ow["accounts"].(map[string]any)
+	if _, ok := accounts["fresh-bot-im-bot"]; !ok {
+		t.Errorf("fresh-bot-im-bot 未被加到 accounts: %v", accounts)
+	}
+	if _, ok := accounts["fresh-bot2-im-bot"]; !ok {
+		t.Errorf("fresh-bot2-im-bot 未被加到 accounts: %v", accounts)
+	}
+
+	// 其他内容保留(已有 binding 还在)
+	if !hasOpenclawWeixinBinding(bindings, "existing-bot-im-bot") {
+		t.Errorf("已有 binding 被破坏: %v", bindings)
+	}
+}
+
+// TestPostWechatBind_BoundDelayedUntilSyncDone 验证 Bound=true 不在 bound marker
+// 被扫描到时立即置位,而是等 sync 完成后才置。这是"先 sync 再告诉前端"的契约,
+// 防止前端过早关 modal 但配置还没同步。
+//
+// 测试技巧:boundCmd 在 scanner 输出 bound marker 后立即 exit 0,所以 status=done 也会
+// 在 ~100ms 内到达。但 Bound=true 必须等 syncDelay(这里 200ms)之后才置,
+// 所以我们轮询 done 状态后立即查 Bound,应仍是 false,等 syncDelay + 100ms 后才是 true。
+func TestPostWechatBind_BoundDelayedUntilSyncDone(t *testing.T) {
+	resetWechatStore(t)
+	openclawConfigSyncDelay = 200 * time.Millisecond
+	t.Cleanup(func() { openclawConfigSyncDelay = 0 })
+
+	baseDir := mockOpenclawConfig(t, `["delayed-bot-im-bot"]`, sampleOpenclawConfig)
+	r := newWechatEngineWithBaseDir(t, boundCmd(), 5*time.Second, baseDir)
+
+	postResp := postWechatBind(t, r)
+	taskID, _ := decodeBody(t, postResp)["task_id"].(string)
+
+	// 轮询等 status=done(boundCmd 几乎立即 exit)
+	final := pollWechatTask(t, r, taskID, 50, 20*time.Millisecond)
+	if final["status"] != string(StatusDone) {
+		t.Fatalf("status = %v, want done", final["status"])
+	}
+	// 此时 syncDelay(200ms)还没过完,Bound 必须是 false
+	if final["bound"] == true {
+		t.Errorf("Bound 在 sync 完成前就被置 true (final=%v),违反'先 sync 再 Bound'契约", final)
+	}
+
+	// 等 sync 完成(syncDelay + buffer)
+	time.Sleep(400 * time.Millisecond)
+	snap, ok := GetWechatTaskStore().GetSnapshot(taskID)
+	if !ok {
+		t.Fatal("task not found after sync")
+	}
+	if !snap.Bound {
+		t.Errorf("sync 完成后 Bound 仍为 false")
+	}
+	if snap.SyncError != "" {
+		t.Errorf("sync 失败,SyncError = %q", snap.SyncError)
+	}
+
+	// openclaw.json 已被更新
+	cfg := readOpenclawJSON(t, baseDir)
+	bindings, _ := cfg["bindings"].([]any)
+	if !hasOpenclawWeixinBinding(bindings, "delayed-bot-im-bot") {
+		t.Errorf("delayed-bot-im-bot 未被加到 bindings")
+	}
+}
+
+// TestPostWechatBind_SyncFailureStillSetsBound sync 失败(accounts.json 不存在 → 视为
+// "还没产生 bot",无操作 → 无 error)不影响 Bound=true 的设置。
+func TestPostWechatBind_SyncFailureStillSetsBound(t *testing.T) {
+	resetWechatStore(t)
+	openclawConfigSyncDelay = 30 * time.Millisecond
+	t.Cleanup(func() { openclawConfigSyncDelay = 0 })
+
+	// baseDir 只有 openclaw.json,没有 accounts.json。
+	// syncOpenclawConfig 对 accounts.json 不存在视为"无操作,无 error",
+	// 所以 Bound=true 应被正常设置。
+	baseDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(baseDir, "openclaw.json"), []byte(sampleOpenclawConfig), 0o644); err != nil {
+		t.Fatalf("write openclaw.json: %v", err)
+	}
+	r := newWechatEngineWithBaseDir(t, boundCmd(), 5*time.Second, baseDir)
+
+	postResp := postWechatBind(t, r)
+	taskID, _ := decodeBody(t, postResp)["task_id"].(string)
+
+	final := pollWechatTask(t, r, taskID, 50, 20*time.Millisecond)
+	if final["status"] != string(StatusDone) {
+		t.Fatalf("status = %v, want done", final["status"])
+	}
+	// 等 sync 完成
+	time.Sleep(150 * time.Millisecond)
+	snap, ok := GetWechatTaskStore().GetSnapshot(taskID)
+	if !ok {
+		t.Fatal("task not found")
+	}
+	if !snap.Bound {
+		t.Errorf("accounts.json 缺失但 Bound 仍应为 true (sync 视为无操作): snap=%+v", snap)
+	}
+}
+
+// TestPostWechatBind_SyncRealErrorSyncErrorField sync 真正出错(openclaw.json 是垃圾 JSON)
+// → SyncError 应有内容,Bound=true 仍置(失败但 openclaw 已连上,运维可见 SyncError)。
+func TestPostWechatBind_SyncRealErrorSyncErrorField(t *testing.T) {
+	resetWechatStore(t)
+	openclawConfigSyncDelay = 30 * time.Millisecond
+	t.Cleanup(func() { openclawConfigSyncDelay = 0 })
+
+	baseDir := t.TempDir()
+	accountsDir := filepath.Join(baseDir, "openclaw-weixin")
+	if err := os.MkdirAll(accountsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(accountsDir, "accounts.json"), []byte(`["any-bot-im-bot"]`), 0o644); err != nil {
+		t.Fatalf("write accounts: %v", err)
+	}
+	// openclaw.json 是垃圾 JSON → sync 解析失败 → syncErr 非空
+	if err := os.WriteFile(filepath.Join(baseDir, "openclaw.json"), []byte(`{ this is not json`), 0o644); err != nil {
+		t.Fatalf("write openclaw.json: %v", err)
+	}
+	r := newWechatEngineWithBaseDir(t, boundCmd(), 5*time.Second, baseDir)
+
+	postResp := postWechatBind(t, r)
+	taskID, _ := decodeBody(t, postResp)["task_id"].(string)
+
+	final := pollWechatTask(t, r, taskID, 50, 20*time.Millisecond)
+	if final["status"] != string(StatusDone) {
+		t.Fatalf("status = %v, want done", final["status"])
+	}
+	// 等 sync 完成
+	time.Sleep(150 * time.Millisecond)
+	snap, ok := GetWechatTaskStore().GetSnapshot(taskID)
+	if !ok {
+		t.Fatal("task not found")
+	}
+	if !snap.Bound {
+		t.Errorf("sync 失败但 Bound 应仍为 true (openclaw 已连上): snap=%+v", snap)
+	}
+	if snap.SyncError == "" {
+		t.Errorf("sync 真正失败时 SyncError 应非空,got empty")
+	}
+
+	// GET 响应也应带 sync_error
+	getReq, _ := http.NewRequest(http.MethodGet, "/api/wechat/bind/"+taskID, nil)
+	getW := httptest.NewRecorder()
+	r.ServeHTTP(getW, getReq)
+	getBody := decodeBody(t, getW)
+	if getBody["sync_error"] == "" || getBody["sync_error"] == nil {
+		t.Errorf("GET 响应 sync_error 字段为空: %v", getBody)
+	}
 }

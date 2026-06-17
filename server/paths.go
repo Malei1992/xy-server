@@ -5,7 +5,8 @@ package main
 
 const (
 	// 项目根目录。CRMDataDir 和 EnvFilePath 均基于此拼接。
-	BASE_DIR = "/home/park_acquisition"
+// 	BASE_DIR = "/home/park_acquisition"
+	BASE_DIR = "/Users/duwei/ml/mutliAgent/park_acquisition"
 
 	// 数据根目录。CRM 数据位于 <CRMDataDir>/crm/ 下（含 index.json、customers/、emails/）。
 	CRMDataDir = BASE_DIR + "/workspace/data"
@@ -68,4 +69,10 @@ const (
 
 	// DockerComposeFile docker compose 配置文件绝对路径。
 	DockerComposeFile = BASE_DIR + "/docker-compose.yml"
+
+	// 备注:openclaw 主配置和微信账号列表的实际路径
+	//   - <BASE_DIR>/openclaw.json
+	//   - <BASE_DIR>/openclaw-weixin/accounts.json
+	// 不在常量里硬编码,因为 handlers/ 包拿不到 package main 的常量,
+	// 这俩路径在 main.go 调用 PostWechatBind 时直接用 BASE_DIR 拼出。
 )
