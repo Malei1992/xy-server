@@ -144,9 +144,37 @@ func runWechatBindTask(taskID string, args []string, timeout time.Duration) {
 	scanner := bufio.NewScanner(stdout)
 	// QR 单行可达 32 字符(块字符) + 控制序列;给足 buffer 防止截断
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	// 早期发布标志:openclaw 实际输出顺序是 QR 块先,link 行后(且 link 行唯一)。
+	// 看到 link 那一行就说明 QR 已经在 stdout 里了 —— 此时把 link/qr 写进 store,
+	// 前端 polling 下个 tick 就能拿到,不用死等 2 分钟 SIGKILL 才把 link/qr 写进去。
+	// 不提前到 QR 块那一行是因为:
+	//   1) QR 块通常 20+ 行,在它还没打完时 parseWechatOutput 已经能拿到部分,但完整版要等
+	//   2) link 是单行单次匹配,信号清晰,且语义自洽(看见 link = 流程已走到「可以扫」阶段)
+	// 一次性发布:`dataPublished` 保证不重复 parse/store.Update。
+	dataPublished := false
 	for scanner.Scan() {
 		stdoutBuf.Write(scanner.Bytes())
 		stdoutBuf.WriteByte('\n')
+
+		if !dataPublished && wechatLinkRegex.Match(scanner.Bytes()) {
+			partialRaw := stdoutBuf.String()
+			partialLink, partialQR := parseWechatOutput(partialRaw)
+			if partialLink != "" && partialQR != "" {
+				dataPublished = true
+				L.Info("wechat bind: early publish link+qr (waiting for cmd.Wait final state)",
+					zap.String("task_id", taskID),
+					zap.String("link", partialLink),
+					zap.Int("qr_lines", strings.Count(partialQR, "\n")+1),
+				)
+				store.Update(taskID, func(t *WechatTask) {
+					// 防御性:不覆盖已存在的 link/qr(虽然理论上没人写过,但写防御不为过)
+					if t.Link == "" && t.QR == "" {
+						t.Link = partialLink
+						t.QR = partialQR
+					}
+				})
+			}
+		}
 	}
 	// scanner.Err() 在 wait 之后再看也无妨,wait 才是权威退出原因
 	waitErr := cmd.Wait()

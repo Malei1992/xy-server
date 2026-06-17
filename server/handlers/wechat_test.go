@@ -359,6 +359,73 @@ func TestPostWechatBind_TimeoutNoOutput(t *testing.T) {
 	}
 }
 
+// TestPostWechatBind_EarlyPublish 早期发布验证:openclaw 在 timeout 之前
+// 就把 link+qr 写进 stdout 了(docker exec 不会自然返回,等用户扫码),
+// 旧实现必须等 backend 2 分钟 timeout SIGKILL 才会把 link/qr 写进 store,
+// 这时 GET 才能拿到 —— 表现就是前端 polling 2 分钟才出 modal,体感坏。
+//
+// 修复后:scanner 循环里看到 link 行就立刻把 link/qr 写进 store。
+// 本测试用 slowCmd(打印 QR + link 后 sleep) + 3s timeout,验证:
+//   - 早期发布:timeout 之前 GET 已经能看到 link/qr(status 仍 running)
+//   - 终态保留:timeout 之后 status=expired,link/qr 仍在(final state 覆盖不丢失)
+func TestPostWechatBind_EarlyPublish(t *testing.T) {
+	resetWechatStore(t)
+	r := newWechatEngine(t, slowCmd(), 3*time.Second)
+
+	postResp := postWechatBind(t, r)
+	if postResp.Code != http.StatusAccepted {
+		t.Fatalf("POST want 202, got %d", postResp.Code)
+	}
+	taskID, _ := decodeBody(t, postResp)["task_id"].(string)
+
+	// 早期发布:轮询 30 次(总 1.5s),期望 ~200ms 内就能看到 link/qr
+	// 注意:break 时只记 earlyBody,不能"顺便"等到终态 —— 那会等到 timeout 后
+	// status 变成 expired,失去 "early publish 时 status 仍 running" 的语义
+	var earlyBody map[string]any
+	var sawEarly bool
+	for i := 0; i < 30; i++ {
+		req, _ := http.NewRequest(http.MethodGet, "/api/wechat/bind/"+taskID, nil)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		body := decodeBody(t, w)
+		link, _ := body["link"].(string)
+		qr, _ := body["qr"].(string)
+		if link != "" && qr != "" {
+			earlyBody = body
+			sawEarly = true
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !sawEarly {
+		t.Fatalf("1.5s 内 GET 没看到 link/qr,early publish 没生效(应早于 3s timeout)")
+	}
+	// 此时 timeout(3s)还没到,status 应是 running,但 link/qr 已被早期发布
+	if earlyBody["status"] != string(StatusRunning) {
+		t.Errorf("early publish 时 status 应是 running,实际 %v", earlyBody["status"])
+	}
+	if earlyBody["link"] != "https://liteapp.weixin.qq.com/q/timeout-link" {
+		t.Errorf("link = %v, want timeout-link", earlyBody["link"])
+	}
+	if earlyBody["qr"] == "" {
+		t.Errorf("qr 不应为空")
+	}
+
+	// 终态:用 pollWechatTask 轮询到 done/failed/expired。
+	// 这时 status 应该是 expired(3s timeout 触发),link/qr 仍在(early publish 已写,
+	// final state 写时不清空 link/qr,只覆盖 status/error/expired)。
+	final := pollWechatTask(t, r, taskID, 50, 100*time.Millisecond)
+	if final["status"] != string(StatusExpired) {
+		t.Errorf("终态 status 应是 expired,实际 %v", final["status"])
+	}
+	if final["link"] != "https://liteapp.weixin.qq.com/q/timeout-link" {
+		t.Errorf("终态 link 应保留(early publish 已写,final state 不清空),实际 %v", final["link"])
+	}
+	if final["qr"] == "" {
+		t.Errorf("终态 qr 不应为空")
+	}
+}
+
 // TestGetWechatBindStatus_NotFound GET 不存在 id → 404
 func TestGetWechatBindStatus_NotFound(t *testing.T) {
 	resetWechatStore(t)
