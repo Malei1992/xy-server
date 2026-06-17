@@ -82,7 +82,7 @@ func main() {
 		wechatBindCmds := [][]string{
 			{"docker", "exec", DockerContainerName, "bash", "-c", "openclaw channels login --channel openclaw-weixin"},
 		}
-		api.POST("/wechat/bind", handlers.PostWechatBind(wechatBindCmds, 30*time.Second))
+		api.POST("/wechat/bind", handlers.PostWechatBind(wechatBindCmds, 2*time.Minute))
 	}
 
 	addr := ListenAddr
