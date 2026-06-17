@@ -1,0 +1,12 @@
+{
+  "id": "CUST-test-001",
+  "basic": {
+    "name": "Test Company 1",
+    "country": "泰国",
+    "industry": "Industrials",
+    "contacts": "test@example.com",
+    "phones": "+66000000000"
+  },
+  "engagement": {"status": "active"},
+  "timeline": []
+}

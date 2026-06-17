@@ -1,0 +1,7 @@
+{
+  "customers": ["CUST-test-001", "CUST-test-002"],
+  "emails": ["MSG-test-001"],
+  "by_status": {"active": ["CUST-test-001"]},
+  "by_intent": {"A": ["CUST-test-001"]},
+  "by_country": {"泰国": ["CUST-test-001", "CUST-test-002"]}
+}

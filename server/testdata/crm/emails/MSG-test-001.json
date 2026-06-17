@@ -1,0 +1,10 @@
+{
+  "id": "MSG-test-001",
+  "direction": "sent",
+  "customer_id": "CUST-test-001",
+  "type": "invitation",
+  "subject": "Test subject",
+  "language": "th",
+  "status": "sent",
+  "created_at": "2026-06-15T00:00:00Z"
+}

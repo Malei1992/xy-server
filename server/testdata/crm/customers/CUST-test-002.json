@@ -1,0 +1,12 @@
+{
+  "id": "CUST-test-002",
+  "basic": {
+    "name": "Test Company 2",
+    "country": "泰国",
+    "industry": "Property",
+    "contacts": "",
+    "phones": "+66000000001"
+  },
+  "engagement": {"status": "active"},
+  "timeline": []
+}
