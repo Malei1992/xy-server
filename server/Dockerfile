@@ -1,4 +1,4 @@
-FROM harbor.anban.shop:15055/abfuzz/alpine:3.18.4
+FROM ubuntu:latest
 
 WORKDIR /opt/xy
 COPY app /opt/xy/app
