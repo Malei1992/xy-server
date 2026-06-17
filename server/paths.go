@@ -5,8 +5,8 @@ package main
 
 const (
 	// 项目根目录。CRMDataDir 和 EnvFilePath 均基于此拼接。
-// 	BASE_DIR = "/home/park_acquisition"
-	BASE_DIR = "/Users/duwei/ml/mutliAgent/park_acquisition"
+	BASE_DIR = "/home/park_acquisition"
+// 	BASE_DIR = "/Users/duwei/ml/mutliAgent/park_acquisition"
 
 	// 数据根目录。CRM 数据位于 <CRMDataDir>/crm/ 下（含 index.json、customers/、emails/）。
 	CRMDataDir = BASE_DIR + "/workspace/data"
