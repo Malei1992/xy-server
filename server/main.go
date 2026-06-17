@@ -83,6 +83,8 @@ func main() {
 			{"docker", "exec", DockerContainerName, "bash", "-c", "openclaw channels login --channel openclaw-weixin"},
 		}
 		api.POST("/wechat/bind", handlers.PostWechatBind(wechatBindCmds, 2*time.Minute))
+		// 微信绑定状态轮询:前端拿到 task_id 后反复 GET 此接口拿结果。
+		api.GET("/wechat/bind/:task_id", handlers.GetWechatBindStatus())
 	}
 
 	addr := ListenAddr
