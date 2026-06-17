@@ -29,9 +29,15 @@ func sysProcAttrForKillGroup() *syscall.SysProcAttr {
 	return &syscall.SysProcAttr{Setpgid: true}
 }
 
-// qrLineRegex 判断单行"全是块字符 ▄/█ 或空白":用于识别 QR 块。
+// qrLineRegex 判断单行"全是 Unicode 块字符或空白":用于识别 QR 块。
 // 块字符之外的任何字符(数字、英文、标点)都让该行落选。
-var qrLineRegex = regexp.MustCompile(`^[\s▄█]+$`)
+//
+// 范围:Unicode Block 元素 U+2580–U+259F(▀▁▂▃▄▅▆▇█▉▊▋▌▍▎▏)
+//  + 块元字符 U+2580(上块) U+2584(下块 ▄) U+2588(全块 █) 等
+//  + 阴影块 U+2591–U+2593(░▒▓)
+// openclaw / 各类终端二维码库都会用这一组(不只 ▄/█ 两个),
+// 之前只放 ▄/█ 会让每行匹配都失败 → QR 块被切成 1 行小段 → < minLines → 解析空。
+var qrLineRegex = regexp.MustCompile(`^[\s▀▁▂▃▄▅▆▇█▉▊▋▌▍▎▏░▒▓]+$`)
 
 // PostWechatBind 处理 POST /api/wechat/bind: **非阻塞** + 轮询模式。
 //
@@ -154,6 +160,11 @@ func runWechatBindTask(taskID string, args []string, timeout time.Duration) {
 		raw += "\n[stderr]\n" + stderrBuf.String()
 	}
 
+	// 不论是 done / failed / expired 都先解析一次 link/qr。
+	// 原因:超时时 openclaw 通常已经打印了 QR + 链接(只是不会自动退出),
+	// 此时虽然 waitErr != nil,前端仍要把 QR 给用户扫 —— 进程被中断但 QR 可能还有效。
+	// expired/failed 路径下 link/qr 仍非空时,Status 走 expired/failed,
+	// 但 Link/QR 字段照填,前端 modal 顶部加"可能有效"提示让用户试扫。
 	link, qr := parseWechatOutput(raw)
 
 	// 失败情况细分:
@@ -165,11 +176,15 @@ func runWechatBindTask(taskID string, args []string, timeout time.Duration) {
 				zap.String("task_id", taskID),
 				zap.Duration("timeout", timeout),
 				zap.Int("stdout_size", stdoutBuf.Len()),
+				zap.Bool("has_link", link != ""),
+				zap.Bool("has_qr", qr != ""),
 			)
 			store.Update(taskID, func(t *WechatTask) {
 				t.Status = StatusExpired
 				t.Expired = true
 				t.Error = "wechat bind failed: " + waitErr.Error()
+				t.Link = link
+				t.QR = qr
 				t.Raw = raw
 				t.CompletedAt = time.Now()
 			})
@@ -178,11 +193,15 @@ func runWechatBindTask(taskID string, args []string, timeout time.Duration) {
 				zap.String("task_id", taskID),
 				zap.Strings("cmd", args),
 				zap.Error(waitErr),
+				zap.Bool("has_link", link != ""),
+				zap.Bool("has_qr", qr != ""),
 			)
 			store.Update(taskID, func(t *WechatTask) {
 				t.Status = StatusFailed
 				t.Expired = false
 				t.Error = "wechat bind failed: " + waitErr.Error()
+				t.Link = link
+				t.QR = qr
 				t.Raw = raw
 				t.CompletedAt = time.Now()
 			})
@@ -200,6 +219,8 @@ func runWechatBindTask(taskID string, args []string, timeout time.Duration) {
 			t.Status = StatusFailed
 			t.Expired = false
 			t.Error = "wechat bind failed: no link or qr in output"
+			t.Link = link
+			t.QR = qr
 			t.Raw = raw
 			t.CompletedAt = time.Now()
 		})

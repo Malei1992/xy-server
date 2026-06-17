@@ -131,6 +131,64 @@ func TestParseWechatOutput_SingleLineNotQR(t *testing.T) {
 	}
 }
 
+// fakeQRBlockFullRange 构造一个标准 20 行 QR 块,使用完整的 Unicode 块字符
+// 集(▀▁▂▃▄▅▆▇█▉▊▋▌▍▎▏ + ░▒▓),而不是只 ▄/█。
+// 验证 qrLineRegex 覆盖完整块元素范围 —— 之前只放 ▄/█ 时,这种块会被切成
+// 1 行小段然后 < minLines,导致解析空。
+func fakeQRBlockFullRange() string {
+	chars := []rune{'▀', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█', '▉', '▊', '▋', '▌', '▍', '▎', '▏', '░', '▒', '▓'}
+	lines := make([]string, 0, 20)
+	for i := 0; i < 20; i++ {
+		row := make([]rune, 32)
+		for j := 0; j < 32; j++ {
+			row[j] = chars[(i+j)%len(chars)]
+		}
+		lines = append(lines, string(row))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// TestParseWechatOutput_FullBlockCharRange QR 块用完整块字符(▀▁▂▃...▓)也应被识别。
+// 之前的实现 qrLineRegex 只放 ▄/█,openclaw 实际会混合使用整组,导致块被切碎。
+func TestParseWechatOutput_FullBlockCharRange(t *testing.T) {
+	out := "starting openclaw login\n" +
+		"Please scan the QR code below:\n" +
+		fakeQRBlockFullRange() + "\n" +
+		"https://liteapp.weixin.qq.com/q/fullrange\n"
+	link, qr := parseWechatOutput(out)
+	if link != "https://liteapp.weixin.qq.com/q/fullrange" {
+		t.Errorf("link = %q", link)
+	}
+	if strings.Count(qr, "\n")+1 != 20 {
+		t.Errorf("qr 应是 20 行,实际 %d 行 (%q)", strings.Count(qr, "\n")+1, qr)
+	}
+	// qr 必须包含 ▀(上块)和 ▓(阴影块)——这些是 ▄/█ 旧正则匹配不到的字符
+	if !strings.Contains(qr, "▀") {
+		t.Errorf("qr 应包含 ▀(上块),实际未含")
+	}
+	if !strings.Contains(qr, "▓") {
+		t.Errorf("qr 应包含 ▓(阴影块),实际未含")
+	}
+}
+
+// TestParseWechatOutput_RealisticOpenclaw 模拟 openclaw 真实输出:
+// QR 块之前有几行中文(被 bufio.Scanner 正常 split),中间是 QR 块,后面有链接。
+// 验证 "最后一对"语义在多语言夹杂场景下仍工作。
+func TestParseWechatOutput_RealisticOpenclaw(t *testing.T) {
+	out := "正在启动...\n\n" +
+		"用手机微信扫描以下二维码,以继续连接：\n\n" +
+		fakeQRBlockFullRange() + "\n" +
+		"https://liteapp.weixin.qq.com/q/7GiQu1?qrcode=xxx&bot_type=3\n" +
+		"\n正在等待操作...\n\n"
+	link, qr := parseWechatOutput(out)
+	if link != "https://liteapp.weixin.qq.com/q/7GiQu1?qrcode=xxx&bot_type=3" {
+		t.Errorf("link = %q", link)
+	}
+	if strings.Count(qr, "\n")+1 != 20 {
+		t.Errorf("qr 应是 20 行,实际 %d 行", strings.Count(qr, "\n")+1)
+	}
+}
+
 // ===== 异步端到端 HTTP 测试 =====
 // 走 gin engine + 真实 handler,验证:POST 立即 202 + task_id;轮询 GET 拿到 done/failed/expired。
 // 同步版本的 e2e 测试已删(契约变了:不再同步等 docker)。
@@ -151,8 +209,21 @@ func failCmd() [][]string {
 	}
 }
 
-// slowCmd 模拟"30s 还没结束":sleep 60
+// slowCmd 模拟"30s 还没结束":先打印完整 QR + link(模拟 openclaw 已生成),
+// 然后 sleep 60(后端 1s 超时,所以会被 SIGKILL 砍掉)。
+//
+// 重点:超时前 stdout 已经有 QR + link —— 旧实现 bug 是只在 done 路径调
+// parseWechatOutput,导致 expired 时 link/qr 都是空。修复后,expired 状态也
+// 应该有 link/qr(用于前端 modal 让用户试扫"可能还有效"的二维码)。
 func slowCmd() [][]string {
+	return [][]string{
+		{"sh", "-c", "echo 'starting...'; echo '" + strings.ReplaceAll(fakeQRBlock(), "\n", "\\n") + "'; echo 'https://liteapp.weixin.qq.com/q/timeout-link'; sleep 60"},
+	}
+}
+
+// slowCmdNoOutput 模拟"30s 还没结束 且 stdout 没 QR":pure sleep。
+// 用来验证 link/qr 都是空时,确实走 failed/error 路径,不会强行填。
+func slowCmdNoOutput() [][]string {
 	return [][]string{
 		{"sh", "-c", "echo 'starting...'; sleep 60"},
 	}
@@ -223,7 +294,9 @@ func TestPostWechatBind_DockerFail(t *testing.T) {
 	}
 }
 
-// TestPostWechatBind_Timeout sleep 60 + 1s 超时 → status=expired, expired=true
+// TestPostWechatBind_Timeout sleep 60 + 1s 超时 → status=expired, expired=true。
+// 同时验证 stdout 中的 QR + link 被保留(因为进程被中断但 QR 可能还有效,
+// 前端要展示 modal 让用户试扫)。
 func TestPostWechatBind_Timeout(t *testing.T) {
 	resetWechatStore(t)
 	r := newWechatEngine(t, slowCmd(), 1*time.Second)
@@ -244,6 +317,45 @@ func TestPostWechatBind_Timeout(t *testing.T) {
 	errStr, _ := final["error"].(string)
 	if errStr == "" {
 		t.Errorf("expired 状态 error 不应为空")
+	}
+	// 关键:虽然 expired,但 link/qr 应该被填上(让前端 modal 让用户试扫)。
+	// 旧实现这两字段都是空字符串。
+	linkStr, _ := final["link"].(string)
+	if linkStr != "https://liteapp.weixin.qq.com/q/timeout-link" {
+		t.Errorf("expired 状态 link 应保留,实际 %q", linkStr)
+	}
+	qrStr, _ := final["qr"].(string)
+	if qrStr == "" {
+		t.Errorf("expired 状态 qr 不应为空(stdout 中有 QR 块)")
+	}
+	rawStr, _ := final["raw"].(string)
+	if !strings.Contains(rawStr, "timeout-link") {
+		t.Errorf("raw 应含原始 link,实际 %q", rawStr)
+	}
+}
+
+// TestPostWechatBind_TimeoutNoOutput 超时且 stdout 无 QR/link → link/qr 都空,
+// 不强行填。这是 expired 路径的"失败"分支,前端展示行内错误而不是 modal。
+func TestPostWechatBind_TimeoutNoOutput(t *testing.T) {
+	resetWechatStore(t)
+	r := newWechatEngine(t, slowCmdNoOutput(), 1*time.Second)
+
+	postResp := postWechatBind(t, r)
+	if postResp.Code != http.StatusAccepted {
+		t.Fatalf("POST want 202, got %d", postResp.Code)
+	}
+	taskID, _ := decodeBody(t, postResp)["task_id"].(string)
+
+	final := pollWechatTask(t, r, taskID, 50, 50*time.Millisecond)
+	if final["status"] != string(StatusExpired) {
+		t.Fatalf("最终 status 应是 expired,实际 %v, body=%v", final["status"], final)
+	}
+	// stdout 没 QR/link → link/qr 都空,符合"真正失败"语义
+	if final["link"] != "" {
+		t.Errorf("stdout 无 link 时,expired 状态 link 应为空,实际 %v", final["link"])
+	}
+	if final["qr"] != "" {
+		t.Errorf("stdout 无 qr 时,expired 状态 qr 应为空,实际 %v", final["qr"])
 	}
 }
 
