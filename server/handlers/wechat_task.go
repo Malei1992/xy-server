@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"sync"
@@ -24,7 +25,14 @@ const (
 )
 
 // WechatTask 一次微信绑定任务的全量状态。POST 立刻建一个(pending),
-// 后台 goroutine 推进 status 并填充 link/qr/raw/error/expired。
+// 后台 goroutine 推进 status 并填充 link/qr/raw/error/expired/bound。
+//
+// Bound:openclaw 成功连接微信后(stdout 出现「已将此 OpenClaw 连接到微信。」)
+// 后台 goroutine 在 scanner 循环里置 true,前端用来切到「绑定成功」状态;
+// 早期发布,不等 cmd 退出就能让前端知道。
+//
+// cancel:context cancel 函数,POST cancel 端点用它来 SIGKILL 整个 exec 进程组。
+// 不暴露给 JSON,因为它仅用于进程内同步。
 //
 // CompletedAt 在状态进入终态(done/failed/expired)时打点,TTL 清理用它作为基准;
 // Active 期间为零值。
@@ -42,8 +50,10 @@ type WechatTask struct {
 	QR          string     `json:"qr"`
 	Raw         string     `json:"raw"`
 	Expired     bool       `json:"expired"`
+	Bound       bool       `json:"bound,omitempty"`
 	Error       string     `json:"error,omitempty"`
 	CompletedAt time.Time  `json:"-"`
+	cancel      context.CancelFunc
 }
 
 // taskLocker 把 mutex 单独抽出来放堆上,避免嵌入 WechatTask 后值拷贝触发

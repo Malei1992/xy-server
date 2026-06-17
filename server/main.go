@@ -85,6 +85,9 @@ func main() {
 		api.POST("/wechat/bind", handlers.PostWechatBind(wechatBindCmds, 2*time.Minute))
 		// 微信绑定状态轮询:前端拿到 task_id 后反复 GET 此接口拿结果。
 		api.GET("/wechat/bind/:task_id", handlers.GetWechatBindStatus())
+		// 微信绑定取消:用户关闭 modal 时前端调这个端点,主动 SIGKILL exec 进程组,
+		// 免等 2 分钟 timeout 兜底。终态 / 不存在 task 返 200/404,具体语义看 handler。
+		api.POST("/wechat/bind/:task_id/cancel", handlers.PostWechatBindCancel())
 	}
 
 	addr := ListenAddr

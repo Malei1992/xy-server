@@ -229,6 +229,30 @@ func slowCmdNoOutput() [][]string {
 	}
 }
 
+// boundCmd 模拟"openclaw 扫码成功后输出成功标记"：打印 QR + link + 标记 + exit 0。
+// 用于测试 Bound=true 在 scanner 循环里被早期发布,以及 final state 里也保留。
+func boundCmd() [][]string {
+	return [][]string{
+		{"sh", "-c", "echo 'starting...'; echo '" + strings.ReplaceAll(fakeQRBlock(), "\n", "\\n") + "'; echo 'https://liteapp.weixin.qq.com/q/bound-link'; echo '已将此 OpenClaw 连接到微信。'; exit 0"},
+	}
+}
+
+// slowBoundCmd 模拟"openclaw 打印了 QR/link,等用户扫码期间":不打印成功标记,
+// sleep 60(让 test 通过 timeout 强制 SIGKILL 走 expired 路径)。但保留 QR/link。
+// 用来验证"early publish 数据但终态不带 Bound"的场景。
+func slowBoundCmd() [][]string {
+	return slowCmd()
+}
+
+// slowBoundWithMarkerCmd 模拟"openclaw 打印了 QR/link 后等用户扫码,然后输出
+// 成功标记后自然 exit 0":用 sleep 0.2 模拟扫码间隔,让 test 能轮询到 running+bound
+// 的中间状态(用户可以提前看到成功标记而不必等 exec 自然返回)。
+func slowBoundWithMarkerCmd() [][]string {
+	return [][]string{
+		{"sh", "-c", "echo 'starting...'; echo '" + strings.ReplaceAll(fakeQRBlock(), "\n", "\\n") + "'; echo 'https://liteapp.weixin.qq.com/q/marker-link'; sleep 0.3; echo '已将此 OpenClaw 连接到微信。'; exit 0"},
+	}
+}
+
 // TestPostWechatBind_Happy 正常输出 → POST 返 202 + task_id;轮询 GET 最终 status=done, link/qr 正确
 func TestPostWechatBind_Happy(t *testing.T) {
 	resetWechatStore(t)
@@ -443,6 +467,166 @@ func TestGetWechatBindStatus_NotFound(t *testing.T) {
 	}
 }
 
+// TestPostWechatBind_DetectsBoundMarker stdout 含「已将此 OpenClaw 连接到微信。」
+// → GET 响应里 bound=true。这是早期发布,即使 exec 还没自然退出,前端也能拿到。
+func TestPostWechatBind_DetectsBoundMarker(t *testing.T) {
+	resetWechatStore(t)
+	// boundCmd 是 exec 0 的命令,但 scanner 循环里看到成功标记就置 Bound=true;
+	// cmd.Wait() 返回 0 → final state 走 done,Bound 保留。
+	r := newWechatEngine(t, boundCmd(), 5*time.Second)
+
+	postResp := postWechatBind(t, r)
+	if postResp.Code != http.StatusAccepted {
+		t.Fatalf("POST want 202, got %d", postResp.Code)
+	}
+	taskID, _ := decodeBody(t, postResp)["task_id"].(string)
+
+	final := pollWechatTask(t, r, taskID, 50, 50*time.Millisecond)
+	if final["status"] != string(StatusDone) {
+		t.Fatalf("最终 status 应是 done,实际 %v, body=%v", final["status"], final)
+	}
+	// 关键:bound=true 被记录在 GET 响应里
+	if final["bound"] != true {
+		t.Errorf("bound = %v, want true (stdout 含成功标记)", final["bound"])
+	}
+	if final["link"] != "https://liteapp.weixin.qq.com/q/bound-link" {
+		t.Errorf("link = %v, want bound-link", final["link"])
+	}
+}
+
+// TestPostWechatBind_BoundEarlyPublish bound 也能早期发布:exec 在 sleep 期间
+// 输出成功标记,timeout 之前 GET 就能看到 bound=true 且 status 仍 running。
+// 这模拟"用户扫码快,docker exec 还没自然退"场景。
+func TestPostWechatBind_BoundEarlyPublish(t *testing.T) {
+	resetWechatStore(t)
+	r := newWechatEngine(t, slowBoundWithMarkerCmd(), 3*time.Second)
+
+	postResp := postWechatBind(t, r)
+	if postResp.Code != http.StatusAccepted {
+		t.Fatalf("POST want 202, got %d", postResp.Code)
+	}
+	taskID, _ := decodeBody(t, postResp)["task_id"].(string)
+
+	// 轮询 30 次(总 1.5s),期望在 0.5s 内能看到 bound=true
+	var earlyBody map[string]any
+	var sawBound bool
+	for i := 0; i < 30; i++ {
+		req, _ := http.NewRequest(http.MethodGet, "/api/wechat/bind/"+taskID, nil)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		body := decodeBody(t, w)
+		if b, _ := body["bound"].(bool); b {
+			earlyBody = body
+			sawBound = true
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !sawBound {
+		t.Fatalf("1.5s 内 GET 没看到 bound=true,early publish 没生效")
+	}
+	// 此时可能在 running,也可能已进入 done(exit 0 后),看时序
+	// 都接受:关键是 bound=true 已写入
+	if earlyBody["bound"] != true {
+		t.Errorf("bound = %v, want true", earlyBody["bound"])
+	}
+}
+
+// TestPostWechatBindCancel_BasicFlow running 期间 cancel → 进程被杀,status=expired,
+// error 含 cancel 提示。这模拟"用户点关闭后等不到 2 分钟 timeout"的场景。
+func TestPostWechatBindCancel_BasicFlow(t *testing.T) {
+	resetWechatStore(t)
+	// slowCmd:打印完 QR+link 后 sleep 60,1s timeout 会 SIGKILL。
+	// cancel 在 timeout 之前调,能抢先结束 exec。
+	r := newWechatEngine(t, slowCmd(), 5*time.Second)
+
+	postResp := postWechatBind(t, r)
+	if postResp.Code != http.StatusAccepted {
+		t.Fatalf("POST want 202, got %d", postResp.Code)
+	}
+	taskID, _ := decodeBody(t, postResp)["task_id"].(string)
+
+	// 等后台 goroutine 把 cancel 字段设上(从 store.Add 到第一个 store.Update(cancel) 之间
+	// 有 200ms 左右的窗口,POST cancel 必须不早于这个时刻)
+	time.Sleep(100 * time.Millisecond)
+
+	// 调 cancel 端点
+	cancelReq, _ := http.NewRequest(http.MethodPost, "/api/wechat/bind/"+taskID+"/cancel", nil)
+	cancelW := httptest.NewRecorder()
+	r.ServeHTTP(cancelW, cancelReq)
+	if cancelW.Code != http.StatusOK {
+		t.Fatalf("cancel want 200, got %d body=%s", cancelW.Code, cancelW.Body.String())
+	}
+	cancelBody := decodeBody(t, cancelW)
+	if cancelBody["cancelled"] != true {
+		t.Errorf("cancelled = %v, want true", cancelBody["cancelled"])
+	}
+
+	// 轮询到终态:status 应是 expired(被 cancel 触发,跟 timeout 等价走 expired 路径)
+	final := pollWechatTask(t, r, taskID, 50, 50*time.Millisecond)
+	if final["status"] != string(StatusExpired) {
+		t.Errorf("cancel 后 status 应是 expired,实际 %v", final["status"])
+	}
+	if final["expired"] != true {
+		t.Errorf("cancel 后 expired 应是 true,实际 %v", final["expired"])
+	}
+	// link/qr 仍保留(早期发布时已写入)
+	if final["link"] != "https://liteapp.weixin.qq.com/q/timeout-link" {
+		t.Errorf("cancel 后 link 应保留,实际 %v", final["link"])
+	}
+}
+
+// TestPostWechatBindCancel_NotFound cancel 不存在 task → 404
+func TestPostWechatBindCancel_NotFound(t *testing.T) {
+	resetWechatStore(t)
+	r := newWechatEngine(t, happyCmd(), 5*time.Second)
+
+	req, _ := http.NewRequest(http.MethodPost, "/api/wechat/bind/wt-doesnotexist/cancel", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("want 404, got %d body=%s", w.Code, w.Body.String())
+	}
+	body := decodeBody(t, w)
+	if body["error"] != "task not found" {
+		t.Errorf("error = %v, want 'task not found'", body["error"])
+	}
+}
+
+// TestPostWechatBindCancel_AfterDone 已 done 的 task 再 cancel → 200 + cancelled=false,
+// 不重复 kill。这是幂等保护(避免前端 modal 关闭按钮被用户连点时出乱子)。
+func TestPostWechatBindCancel_AfterDone(t *testing.T) {
+	resetWechatStore(t)
+	r := newWechatEngine(t, happyCmd(), 5*time.Second)
+
+	postResp := postWechatBind(t, r)
+	if postResp.Code != http.StatusAccepted {
+		t.Fatalf("POST want 202, got %d", postResp.Code)
+	}
+	taskID, _ := decodeBody(t, postResp)["task_id"].(string)
+
+	// 轮询到 done
+	final := pollWechatTask(t, r, taskID, 50, 50*time.Millisecond)
+	if final["status"] != string(StatusDone) {
+		t.Fatalf("setup: 任务应先到 done,实际 %v", final["status"])
+	}
+
+	// cancel 已 done 的 task
+	cancelReq, _ := http.NewRequest(http.MethodPost, "/api/wechat/bind/"+taskID+"/cancel", nil)
+	cancelW := httptest.NewRecorder()
+	r.ServeHTTP(cancelW, cancelReq)
+	if cancelW.Code != http.StatusOK {
+		t.Fatalf("cancel 已 done task want 200, got %d body=%s", cancelW.Code, cancelW.Body.String())
+	}
+	cancelBody := decodeBody(t, cancelW)
+	if cancelBody["cancelled"] != false {
+		t.Errorf("done task cancel 后 cancelled = %v, want false", cancelBody["cancelled"])
+	}
+	if cancelBody["reason"] != "task already finished" {
+		t.Errorf("reason = %v, want 'task already finished'", cancelBody["reason"])
+	}
+}
+
 // TestPostWechatBind_ConcurrentTasks 同时建 3 个 task,各自独立完成,互不干扰
 func TestPostWechatBind_ConcurrentTasks(t *testing.T) {
 	resetWechatStore(t)
@@ -650,6 +834,7 @@ func newWechatEngine(t *testing.T, commands [][]string, timeout time.Duration) *
 	api := r.Group("/api")
 	api.POST("/wechat/bind", PostWechatBind(commands, timeout))
 	api.GET("/wechat/bind/:task_id", GetWechatBindStatus())
+	api.POST("/wechat/bind/:task_id/cancel", PostWechatBindCancel())
 	return r
 }
 

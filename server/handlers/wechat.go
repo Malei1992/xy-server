@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"os/exec"
 	"regexp"
@@ -21,6 +22,13 @@ const qrBlockMinLines = 5
 
 // wechatLinkRegex 匹配微信扫码链接。一个非空白字符结尾,足以涵盖 query string。
 var wechatLinkRegex = regexp.MustCompile(`https://liteapp\.weixin\.qq\.com/q/\S+`)
+
+// wechatBoundRegex 匹配 openclaw 成功连接微信后的输出:
+//   「已将此 OpenClaw 连接到微信。」
+// 看到这一行说明用户已经扫码并确认,exec 即将自然退出。
+// 用于在 scanner 循环里早期设 Bound=true,前端 polling 拿到 bound:true 后
+// 切到「绑定成功」状态,不等 cmd.Wait()。
+var wechatBoundRegex = regexp.MustCompile(`已将此 OpenClaw 连接到微信`)
 
 // sysProcAttrForKillGroup 返回让子进程独占进程组的 SysProcAttr(POSIX)。
 // 配合 cmd.Cancel 用负号 PGID 杀整组,确保 `sh -c "sleep 60"` 里的 sleep 一并被 SIGKILL,
@@ -102,6 +110,12 @@ func runWechatBindTask(taskID string, args []string, timeout time.Duration) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	// 暴露给 POST /api/wechat/bind/:task_id/cancel 用:
+	// 用户关掉 modal 时调 cancel(),通过 context 触发 cmd.Cancel 杀整个进程组
+	// (kill -SIGKILL -PGID),不用等 2 分钟 timeout。
+	store.Update(taskID, func(t *WechatTask) {
+		t.cancel = cancel
+	})
 
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	// 子进程放新进程组(Setpgid=true),超时 SIGKILL 时连同 sh -c "sleep 60" 里的 sleep 一起杀。
@@ -151,7 +165,13 @@ func runWechatBindTask(taskID string, args []string, timeout time.Duration) {
 	//   1) QR 块通常 20+ 行,在它还没打完时 parseWechatOutput 已经能拿到部分,但完整版要等
 	//   2) link 是单行单次匹配,信号清晰,且语义自洽(看见 link = 流程已走到「可以扫」阶段)
 	// 一次性发布:`dataPublished` 保证不重复 parse/store.Update。
+	//
+	// bound 标志独立:用户扫码后 stdout 出现「已将此 OpenClaw 连接到微信。」,
+	// 不代表 link/qr 已经抓完(虽然按 openclaw 实际输出顺序 link/qr 必在它之前),
+	// 但概念上是独立事件 —— link/qr 是「可以扫了」,bound 是「扫成功了」。
+	// 用独立标志避免互相覆盖。
 	dataPublished := false
+	boundPublished := false
 	for scanner.Scan() {
 		stdoutBuf.Write(scanner.Bytes())
 		stdoutBuf.WriteByte('\n')
@@ -175,12 +195,30 @@ func runWechatBindTask(taskID string, args []string, timeout time.Duration) {
 				})
 			}
 		}
+
+		// 成功标记早期发布:用户扫码后 openclaw 立刻输出这一行。
+		// 立即把 Bound=true 写进 store,前端 polling 下个 tick 就能切到
+		// 「绑定成功」状态。如果此时 timeout 还在 2 分钟外,前端比等 timeout
+		// 早得多就拿到结果。
+		if !boundPublished && wechatBoundRegex.Match(scanner.Bytes()) {
+			boundPublished = true
+			L.Info("wechat bind: detected success marker, setting Bound=true",
+				zap.String("task_id", taskID),
+			)
+			store.Update(taskID, func(t *WechatTask) {
+				t.Bound = true
+			})
+		}
 	}
 	// scanner.Err() 在 wait 之后再看也无妨,wait 才是权威退出原因
 	waitErr := cmd.Wait()
 
-	// ctx 超时 → cmd.Wait() 报 context deadline exceeded,且子进程已被 kill
-	expired := waitErr != nil && ctx.Err() == context.DeadlineExceeded
+	// ctx 取消(超时 OR 用户主动 cancel)→ cmd.Wait() 报非 nil,且子进程已被 kill。
+	// 这里 ctx.Err() != nil 涵盖两种情况:context.DeadlineExceeded(timeout)和
+	// context.Canceled(用户调 POST /cancel 端点)。前端对此统一视为"进程被中断",
+	// 区别只在 error 字段文案。
+	expired := waitErr != nil && ctx.Err() != nil
+	userCancelled := waitErr != nil && errors.Is(ctx.Err(), context.Canceled)
 
 	raw := stdoutBuf.String()
 	// 失败时把 stderr 拼到 output 末尾,排障用
@@ -196,12 +234,17 @@ func runWechatBindTask(taskID string, args []string, timeout time.Duration) {
 	link, qr := parseWechatOutput(raw)
 
 	// 失败情况细分:
-	//   - 超时(ctx deadline exceeded) → expired=true, status=expired
+	//   - ctx 取消(超时 / 用户 cancel)→ expired=true, status=expired
 	//   - 启动后 exit 非 0(容器不存在、openclaw 报错) → expired=false, status=failed
 	if waitErr != nil {
 		if expired {
-			L.Warn("wechat bind: timeout",
+			reason := "timeout"
+			if userCancelled {
+				reason = "user cancelled"
+			}
+			L.Warn("wechat bind: ctx cancelled",
 				zap.String("task_id", taskID),
+				zap.String("reason", reason),
 				zap.Duration("timeout", timeout),
 				zap.Int("stdout_size", stdoutBuf.Len()),
 				zap.Bool("has_link", link != ""),
@@ -210,7 +253,12 @@ func runWechatBindTask(taskID string, args []string, timeout time.Duration) {
 			store.Update(taskID, func(t *WechatTask) {
 				t.Status = StatusExpired
 				t.Expired = true
-				t.Error = "wechat bind failed: " + waitErr.Error()
+				// 用户主动 cancel:用专属文案,前端可显示「已取消」而不是「超时」
+				if userCancelled {
+					t.Error = "wechat bind cancelled by user"
+				} else {
+					t.Error = "wechat bind failed: " + waitErr.Error()
+				}
 				t.Link = link
 				t.QR = qr
 				t.Raw = raw
@@ -304,7 +352,70 @@ func GetWechatBindStatus() gin.HandlerFunc {
 			"qr":      t.QR,
 			"raw":     t.Raw,
 			"expired": t.Expired,
+			"bound":   t.Bound,
 			"error":   t.Error,
+		})
+	}
+}
+
+// PostWechatBindCancel 处理 POST /api/wechat/bind/:task_id/cancel,让前端在用户
+// 关闭 modal 时主动结束 exec(免等 2 分钟 timeout)。
+//
+// 语义:
+//   - task_id 不存在 / 已 TTL 清理 → 404 {"error":"task not found"}
+//   - task 已是终态(done/failed/expired) → 200,error="task already finished",不重复 kill
+//   - task 还在 running → 调 cancel() 触发 cmd.Cancel 杀整个进程组,设 expired=true,
+//     写 error="user cancelled"
+//
+// cancel() 走 context cancel,触发 cmd.Cancel(SIGKILL -PGID)同步收尾;
+// runWechatBindTask 里的 cmd.Wait() 在 cancel 后会返回,后续流程跟 timeout 路径一致。
+func PostWechatBindCancel() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		taskID := c.Param("task_id")
+		store := GetWechatTaskStore()
+		t, ok := store.GetSnapshot(taskID)
+		if !ok {
+			c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+			return
+		}
+		// 已终态:不重复 cancel,直接返 200。cancel 字段没暴露给 JSON 走 Get
+		// 拿到的是 snapshot,直接读 cancel 没意义,需要再 Get 原引用。
+		switch t.Status {
+		case StatusDone, StatusFailed, StatusExpired:
+			c.JSON(http.StatusOK, gin.H{
+				"task_id": taskID,
+				"status":  string(t.Status),
+				"cancelled": false,
+				"reason": "task already finished",
+			})
+			return
+		}
+		// 拿 store 里的原引用,调 cancel
+		orig, ok := store.Get(taskID)
+		if !ok {
+			c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+			return
+		}
+		var cancelFn context.CancelFunc
+		orig.locker.mu.Lock()
+		cancelFn = orig.cancel
+		orig.locker.mu.Unlock()
+		if cancelFn == nil {
+			// cancel 还没初始化(背景 goroutine 还没跑到 store.Update(cancel))
+			// 这种场景极少,返 503 让前端等几百 ms 重试
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error":   "cancel not ready yet",
+				"task_id": taskID,
+			})
+			return
+		}
+		cancelFn()
+		L.Info("wechat bind: user cancel requested",
+			zap.String("task_id", taskID),
+		)
+		c.JSON(http.StatusOK, gin.H{
+			"task_id":    taskID,
+			"cancelled":  true,
 		})
 	}
 }
