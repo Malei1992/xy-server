@@ -10,6 +10,6 @@ case "$1" in
 esac
 
 # update this tag when you build a new image.(x86_64-linux-4.8.4/arm64-linux-4.8.4)
-#./build.sh static linux "$ARCH"
+./build.sh static linux "$ARCH"
 #(cd "$cmdDir"/absearch-server && ./xbuild.sh linux "$ARCH")
 docker build -f Dockerfile --platform linux/"$ARCH"  -t "xy-server:latest" .
