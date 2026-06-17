@@ -255,6 +255,14 @@ func slowBoundWithMarkerCmd() [][]string {
 	}
 }
 
+// alreadyBoundCmd 模拟"openclaw 检测到该 gateway 早就连过微信,直接 noop 退出":
+// 输出 QR + link + 已连接过标记 + exit 0。这是"用户点'绑定'但实际上之前已绑过"的场景。
+func alreadyBoundCmd() [][]string {
+	return [][]string{
+		{"sh", "-c", "echo 'starting...'; echo '" + strings.ReplaceAll(fakeQRBlock(), "\n", "\\n") + "'; echo 'https://liteapp.weixin.qq.com/q/already-link'; echo '已连接过此 OpenClaw，无需重复连接'; exit 0"},
+	}
+}
+
 // TestPostWechatBind_Happy 正常输出 → POST 返 202 + task_id;轮询 GET 最终 status=done, link/qr 正确
 func TestPostWechatBind_Happy(t *testing.T) {
 	resetWechatStore(t)
@@ -1104,5 +1112,134 @@ func TestPostWechatBind_SyncRealErrorSyncErrorField(t *testing.T) {
 	getBody := decodeBody(t, getW)
 	if getBody["sync_error"] == "" || getBody["sync_error"] == nil {
 		t.Errorf("GET 响应 sync_error 字段为空: %v", getBody)
+	}
+}
+
+// ===== "已连接过此 OpenClaw，无需重复连接" 文案检测 =====
+//
+// 场景:用户点"绑定"但 openclaw 检测到该 gateway 早就连过某个微信账号,
+// 直接 noop 输出"已连接过此 OpenClaw，无需重复连接"并 exit 0。
+// 这是 noop 场景——openclaw.json 早就同步过,bot IDs 早已登记,不需要再 sync。
+//
+// 行为:
+//   - Bound=true(openclaw 没失败,只是 noop,用户视角"已经绑定" = 成功)
+//   - AlreadyBound=true 让前端区分提示"该用户已绑定"vs"绑定成功"
+//   - 不调 scheduleOpenclawConfigSync(配置早就同步,跳过)
+
+// TestPostWechatBind_DetectsAlreadyBoundMarker exec 输出已连接过标记 → Bound=true + AlreadyBound=true
+func TestPostWechatBind_DetectsAlreadyBoundMarker(t *testing.T) {
+	resetWechatStore(t)
+	r := newWechatEngine(t, alreadyBoundCmd(), 5*time.Second)
+
+	postResp := postWechatBind(t, r)
+	if postResp.Code != http.StatusAccepted {
+		t.Fatalf("POST want 202, got %d", postResp.Code)
+	}
+	taskID, _ := decodeBody(t, postResp)["task_id"].(string)
+
+	final := pollWechatTask(t, r, taskID, 50, 50*time.Millisecond)
+	if final["status"] != string(StatusDone) {
+		t.Fatalf("最终 status 应是 done,实际 %v, body=%v", final["status"], final)
+	}
+	if final["bound"] != true {
+		t.Errorf("bound = %v, want true (已连接场景下 Bound 应为 true)", final["bound"])
+	}
+	if final["already_bound"] != true {
+		t.Errorf("already_bound = %v, want true (应识别'已连接过'标记)", final["already_bound"])
+	}
+	if final["link"] != "https://liteapp.weixin.qq.com/q/already-link" {
+		t.Errorf("link = %v, want already-link", final["link"])
+	}
+}
+
+// TestPostWechatBind_AlreadyBoundSkipsSync 已绑定场景下 sync 必须不调用(openclaw.json 不被修改)
+//
+// 这是核心契约:用户明确说"既不用openclaw.json 也不用任何操作"。
+// 验证方法:用 mock accounts.json 装"新 bot",跑已绑定场景,然后看 openclaw.json
+// 是不是没动过(没有 sync 写入的新 binding / account)。
+func TestPostWechatBind_AlreadyBoundSkipsSync(t *testing.T) {
+	resetWechatStore(t)
+	openclawConfigSyncDelay = 50 * time.Millisecond
+	t.Cleanup(func() { openclawConfigSyncDelay = 0 })
+
+	baseDir := mockOpenclawConfig(t,
+		`["should-not-be-synced-im-bot"]`, // 假设 sync 会跑的话,这个 bot 会被写进 openclaw.json
+		sampleOpenclawConfig,
+	)
+	// 记录初始 bindings 数量(应被 sync 跳过 → 数量不变)
+	before := readOpenclawJSON(t, baseDir)
+	beforeBindingsCount := len(before["bindings"].([]any))
+
+	r := newWechatEngineWithBaseDir(t, alreadyBoundCmd(), 5*time.Second, baseDir)
+
+	postResp := postWechatBind(t, r)
+	taskID, _ := decodeBody(t, postResp)["task_id"].(string)
+
+	final := pollWechatTask(t, r, taskID, 50, 20*time.Millisecond)
+	if final["status"] != string(StatusDone) {
+		t.Fatalf("status = %v, want done", final["status"])
+	}
+	if final["bound"] != true {
+		t.Errorf("bound = %v, want true", final["bound"])
+	}
+	if final["already_bound"] != true {
+		t.Errorf("already_bound = %v, want true", final["already_bound"])
+	}
+
+	// 等足够长的时间覆盖 sync delay,确保如果有 sync 应该已经跑完
+	time.Sleep(200 * time.Millisecond)
+
+	// 验证 openclaw.json 没被 sync 写入新内容
+	after := readOpenclawJSON(t, baseDir)
+	afterBindingsCount := len(after["bindings"].([]any))
+	if afterBindingsCount != beforeBindingsCount {
+		t.Errorf("bindings count 变化: %d → %d (已绑定场景下 sync 必须不调用)",
+			beforeBindingsCount, afterBindingsCount)
+	}
+	if hasOpenclawWeixinBinding(after["bindings"].([]any), "should-not-be-synced-im-bot") {
+		t.Errorf("accounts.json 的 bot 被写进了 openclaw.json,违反'已绑定场景不动 openclaw.json'契约")
+	}
+}
+
+// TestPostWechatBind_BothMarkersAlreadyBoundWins 如果 exec 同时输出两种标记(理论上不应发生但防御性测试),
+// 已连接标记优先——因为它意味着"openclaw 没真正发起新连接",即使 stdout 后续又出现"已连上",
+// 同步行为应该按"已连接"处理(跳过 sync)。
+//
+// 模拟:stdout 同时输出两种标记时,只看是否同时设置了 AlreadyBound + Bound=true,
+// 不调用 sync(行为跟纯已连接场景一致)。
+func TestPostWechatBind_BothMarkersAlreadyBoundWins(t *testing.T) {
+	resetWechatStore(t)
+	openclawConfigSyncDelay = 50 * time.Millisecond
+	t.Cleanup(func() { openclawConfigSyncDelay = 0 })
+
+	// 自定义 cmd:同时输出两种标记
+	bothMarkersCmd := [][]string{
+		{"sh", "-c", "echo 'starting...'; echo '" + strings.ReplaceAll(fakeQRBlock(), "\n", "\\n") + "'; echo 'https://liteapp.weixin.qq.com/q/both-link'; echo '已连接过此 OpenClaw，无需重复连接'; echo '已将此 OpenClaw 连接到微信。'; exit 0"},
+	}
+
+	baseDir := mockOpenclawConfig(t, `["should-not-be-synced-im-bot"]`, sampleOpenclawConfig)
+	before := readOpenclawJSON(t, baseDir)
+	beforeBindingsCount := len(before["bindings"].([]any))
+
+	r := newWechatEngineWithBaseDir(t, bothMarkersCmd, 5*time.Second, baseDir)
+	postResp := postWechatBind(t, r)
+	taskID, _ := decodeBody(t, postResp)["task_id"].(string)
+
+	final := pollWechatTask(t, r, taskID, 50, 20*time.Millisecond)
+	if final["bound"] != true {
+		t.Errorf("bound = %v, want true", final["bound"])
+	}
+	if final["already_bound"] != true {
+		t.Errorf("already_bound = %v, want true (已连接标记应被识别)", final["already_bound"])
+	}
+
+	// 等足够时间覆盖 sync delay
+	time.Sleep(200 * time.Millisecond)
+
+	// sync 必须跳过(已连接标记优先级高于已连上标记)
+	after := readOpenclawJSON(t, baseDir)
+	if len(after["bindings"].([]any)) != beforeBindingsCount {
+		t.Errorf("bindings count 变化: %d → %d (已连接标记存在时 sync 必须跳过)",
+			beforeBindingsCount, len(after["bindings"].([]any)))
 	}
 }

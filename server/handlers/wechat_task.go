@@ -57,6 +57,15 @@ type WechatTask struct {
 	// 但日志 + 这个字段会让运维知道"配置没同步,需要人工处理"。
 	// omitempty:成功时不出现在 JSON 响应里,前端看不到噪音。
 	SyncError   string     `json:"sync_error,omitempty"`
+	// AlreadyBound:openclaw 输出"已连接过此 OpenClaw，无需重复连接"时为 true。
+	// 含义:用户扫码但 openclaw 发现这次连接已经存在(即之前已经绑过),不需要再连一次。
+	// 跟 Bound 的区别:
+	//   - Bound=true:openclaw 刚刚连上了(可能是新连,也可能是 noop)
+	//   - AlreadyBound=true:openclaw 明确说"早就连过了,不用重复连"
+	// already-bound 场景下不动 openclaw.json(sync 跳过,因为配置早就有);
+	// 前端看到此字段应展示"该用户已绑定"而不是"绑定成功",文案更准确。
+	// omitempty:false 时不出现在 JSON,只有已绑定场景返回 true。
+	AlreadyBound bool       `json:"already_bound,omitempty"`
 	CompletedAt time.Time  `json:"-"`
 	cancel      context.CancelFunc
 }

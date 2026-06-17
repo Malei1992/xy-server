@@ -30,6 +30,19 @@ var wechatLinkRegex = regexp.MustCompile(`https://liteapp\.weixin\.qq\.com/q/\S+
 // 切到「绑定成功」状态,不等 cmd.Wait()。
 var wechatBoundRegex = regexp.MustCompile(`已将此 OpenClaw 连接到微信`)
 
+// wechatAlreadyBoundRegex 匹配 openclaw 提示"该 OpenClaw 之前已经连过微信,
+// 不用重复连"的输出:
+//   「已连接过此 OpenClaw，无需重复连接」
+// 含义:用户点绑定时 openclaw 检测到这个 gateway 已经绑过某个微信账号,
+// 所以没有真正发起新连接。exec 会自然退出(exit 0)且 status=done。
+//
+// 处理:
+//   - 设 Bound=true(openclaw 这次没失败,只是 noop,用户视角"已经绑定" = 成功)
+//   - 设 AlreadyBound=true 让前端区分提示
+//   - 跳过 scheduleOpenclawConfigSync(openclaw.json 早就同步过了,bot IDs 早已登记,
+//     重复 sync 是无操作但仍会创建空 goroutine;不调用更省)
+var wechatAlreadyBoundRegex = regexp.MustCompile(`已连接过此 OpenClaw，无需重复连接`)
+
 // sysProcAttrForKillGroup 返回让子进程独占进程组的 SysProcAttr(POSIX)。
 // 配合 cmd.Cancel 用负号 PGID 杀整组,确保 `sh -c "sleep 60"` 里的 sleep 一并被 SIGKILL,
 // 否则 exec.CommandContext 默认只杀 sh,sleep 变孤儿,cmd.Wait 要 60s 才返回。
@@ -206,6 +219,18 @@ func runWechatBindTask(taskID string, args []string, timeout time.Duration, base
 		//   - 用户原话:"这个步骤操作完后,在返回给前端,绑定完成"
 		//   - Bound=true 前置会让前端立刻关 modal,但 sync 失败时配置没同步,
 		//     下次 wechat agent 启动会找不到 binding,排查难
+		if !boundPublished && wechatAlreadyBoundRegex.Match(scanner.Bytes()) {
+			boundPublished = true
+			L.Info("wechat bind: detected already-bound marker (noop)",
+				zap.String("task_id", taskID),
+			)
+			store.Update(taskID, func(t *WechatTask) {
+				t.AlreadyBound = true
+				t.Bound = true
+			})
+			// 注意:不调 scheduleOpenclawConfigSync。已绑定场景下 openclaw.json
+			// 早就同步过了,bot IDs 早已登记,重复 sync 是无操作但仍会创建空 goroutine。
+		}
 		if !boundPublished && wechatBoundRegex.Match(scanner.Bytes()) {
 			boundPublished = true
 			L.Info("wechat bind: detected success marker, scheduling config sync",
@@ -351,15 +376,16 @@ func GetWechatBindStatus() gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{
-			"task_id":    t.TaskID,
-			"status":     string(t.Status),
-			"link":       t.Link,
-			"qr":         t.QR,
-			"raw":        t.Raw,
-			"expired":    t.Expired,
-			"bound":      t.Bound,
-			"error":      t.Error,
-			"sync_error": t.SyncError,
+			"task_id":       t.TaskID,
+			"status":        string(t.Status),
+			"link":          t.Link,
+			"qr":            t.QR,
+			"raw":           t.Raw,
+			"expired":       t.Expired,
+			"bound":         t.Bound,
+			"error":         t.Error,
+			"sync_error":    t.SyncError,
+			"already_bound": t.AlreadyBound,
 		})
 	}
 }
