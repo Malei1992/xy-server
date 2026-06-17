@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"time"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -77,6 +78,11 @@ func main() {
 			{"docker", "compose", "-f", DockerComposeFile, "up", "-d"},
 		}
 		api.POST("/restart", handlers.PostRestart(restartCmds))
+		// 微信绑定:在 gateway 容器内启动 openclaw 微信登录,返回二维码 + 链接
+		wechatBindCmds := [][]string{
+			{"docker", "exec", "-it", DockerContainerName, "bash", "-c", "openclaw channels login --channel openclaw-weixin"},
+		}
+		api.POST("/wechat/bind", handlers.PostWechatBind(wechatBindCmds, 30*time.Second))
 	}
 
 	addr := ListenAddr
