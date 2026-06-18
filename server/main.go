@@ -93,6 +93,7 @@ func main() {
 		api.GET("/users", handlers.GetUsers(UsersFilePath))
 		api.POST("/users", handlers.PostUser(UsersFilePath))
 		api.PATCH("/users/:account", handlers.PatchUser(UsersFilePath))
+		api.DELETE("/users/:account", handlers.DeleteUser(UsersFilePath))
 	}
 
 	addr := ListenAddr

@@ -33,6 +33,7 @@ func newUsersRouter(t *testing.T, initial string) (*gin.Engine, string) {
 	api.GET("/users", GetUsers(path))
 	api.POST("/users", PostUser(path))
 	api.PATCH("/users/:account", PatchUser(path))
+	api.DELETE("/users/:account", DeleteUser(path))
 	return r, path
 }
 
@@ -361,6 +362,67 @@ func TestPatchUser_Success(t *testing.T) {
 	})
 	if wNew.Code != http.StatusOK {
 		t.Errorf("新密码应成功,got %d; body=%s", wNew.Code, wNew.Body.String())
+	}
+}
+
+// ===== DeleteUser =====
+
+// 创建账号 → 删 → 200 + 文件里少一个 + 后续 login 失败
+func TestDeleteUser_Success(t *testing.T) {
+	r, path := newUsersRouter(t, `{"admin":"admin123","alice":"pw1"}`)
+
+	w := doJSON(t, r, http.MethodDelete, "/api/users/alice", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body=%s", w.Code, w.Body.String())
+	}
+	body := decodeJSON(t, w)
+	if body["ok"] != true {
+		t.Errorf("ok = %v, want true", body["ok"])
+	}
+
+	// 文件里 admin 还在,alice 没了
+	users := readUsersFile(t, path)
+	if _, exists := users["alice"]; exists {
+		t.Errorf("alice 未被删除: %v", users)
+	}
+	if users["admin"] != "admin123" {
+		t.Errorf("admin password changed: %v", users)
+	}
+
+	// 后续 login alice 应 404
+	wLogin := doJSON(t, r, http.MethodPost, "/api/login", map[string]string{
+		"account":  "alice",
+		"password": "pw1",
+	})
+	if wLogin.Code != http.StatusNotFound {
+		t.Errorf("已删除账号 login 应 404,got %d; body=%s", wLogin.Code, wLogin.Body.String())
+	}
+}
+
+// 删不存在的账号 → 404
+func TestDeleteUser_AccountNotFound(t *testing.T) {
+	r, path := newUsersRouter(t, `{"admin":"admin123"}`)
+
+	w := doJSON(t, r, http.MethodDelete, "/api/users/ghost", nil)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("want 404, got %d; body=%s", w.Code, w.Body.String())
+	}
+
+	// 文件没被破坏
+	users := readUsersFile(t, path)
+	if users["admin"] != "admin123" {
+		t.Errorf("admin password changed: %v", users)
+	}
+}
+
+// URL path 含空格 → gin URL-decode 后被 validateAccount 正则拒 → 400
+func TestDeleteUser_InvalidAccount(t *testing.T) {
+	r, _ := newUsersRouter(t, `{"admin":"admin123"}`)
+
+	// "has%20space" → gin 解码为 "has space" → 含空格被正则拒
+	w := doJSON(t, r, http.MethodDelete, "/api/users/has%20space", nil)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("want 400 for URL-decoded 'has space', got %d; body=%s", w.Code, w.Body.String())
 	}
 }
 

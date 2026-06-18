@@ -244,6 +244,45 @@ func PostUser(usersPath string) gin.HandlerFunc {
 	}
 }
 
+// DeleteUser 处理 DELETE /api/users/:account,删除指定账号。
+//   - 路径 account 不合法 → 400
+//   - 账号不存在 → 404
+//   - 成功 → 200 + {ok:true}
+//
+// 不做"不能删自己"校验:后端无 token 不知道当前登录者,前端隐藏自己账号的删除按钮
+// 来实现"自己不能删自己"的产品约束。
+func DeleteUser(usersPath string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		account := c.Param("account")
+		if err := validateAccount(account); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		usersMu.Lock()
+		defer usersMu.Unlock()
+
+		users, err := loadUsers(usersPath)
+		if err != nil {
+			L.Error("delete user: load failed", zap.Error(err))
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if _, exists := users[account]; !exists {
+			c.JSON(http.StatusNotFound, gin.H{"ok": false, "error": "账号不存在"})
+			return
+		}
+		delete(users, account)
+		if err := saveUsers(usersPath, users); err != nil {
+			L.Error("delete user: save failed", zap.Error(err))
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		L.Info("users: deleted", zap.String("account", account))
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	}
+}
+
 // PatchUser 处理 PATCH /api/users/:account,改密码。
 //   - 校验失败 / newPassword != confirmNewPassword → 400
 //   - 旧密码错 → 401
