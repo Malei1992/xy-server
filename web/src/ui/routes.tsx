@@ -7,7 +7,7 @@ import { ProjectList } from "./pages/ProjectList";
 import { TaskList } from "./pages/TaskList";
 import { OpportunityList } from "./pages/OpportunityList";
 import { Settings } from "./pages/Settings";
-import { Users as SettingsUsers } from "./pages/Settings/Users";
+import { Users } from "./pages/Users";
 import { Login } from "./pages/Login";
 import { NotFound } from "./pages/NotFound";
 import { isLoggedIn } from "./auth";
@@ -54,7 +54,7 @@ export function AppRoutes() {
         <Route path="tasks" element={<TaskList />} />
         <Route path="opportunities" element={<OpportunityList />} />
         <Route path="settings" element={<Settings />} />
-        <Route path="settings/users" element={<SettingsUsers />} />
+        <Route path="users" element={<Users />} />
         <Route path="*" element={<NotFound />} />
       </Route>
     </Routes>

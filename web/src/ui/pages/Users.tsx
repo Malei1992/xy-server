@@ -1,30 +1,37 @@
 import { useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { listUsers, createUser, changePassword } from "@/query/users";
+import { listUsers, createUser, changePassword, deleteUser } from "@/query/users";
 import type { UserListItem } from "@/query/types";
-import { clearLogin, getLoggedInAccount } from "@/ui/auth";
+import { getLoggedInAccount } from "@/ui/auth";
 import { PasswordInput } from "@/ui/components/PasswordInput";
 
 // 用户管理页:
 // - 进入页面自动调 listUsers
-// - 顶部按钮:「新增用户」「退出登录」
-// - 表格:每行账号 + 「修改密码」按钮
-// - 新增 / 修改密码 都在弹窗内完成
+// - 顶部按钮:「新增用户」
+// - 退出登录已上提到 Layout 右上角
+// - 表格:每行账号 + 「修改密码」/「删除」按钮
+// - 新增 / 修改密码 / 删除 都在弹窗 / inline 确认 UI 内完成
 // - 弹窗的取消 / 提交 / 校验失败 / 后端错误都按现有 Settings 风格内联展示
 //
-// 弹窗的 testid:
+// 弹窗 / 操作的 testid:
 //   add-user-modal / add-user-account / add-user-password / add-user-submit /
 //   add-user-cancel / add-user-error
 //   change-pw-modal / change-pw-old / change-pw-new / change-pw-confirm /
 //   change-pw-submit / change-pw-cancel / change-pw-error / change-pw-mismatch
 //   user-row-<account> / change-pw-button-<account>
+//   delete-user-<account> / delete-confirm-<account> / delete-cancel-<account> /
+//   delete-error-<account>
 
 export function Users() {
-  const navigate = useNavigate();
   const [users, setUsers] = useState<UserListItem[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [changeTarget, setChangeTarget] = useState<string | null>(null);
+  // 行内删除确认:点击「删除」→ 进入该行的确认态(显示「确认」「取消」二选一)
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  // 行内删除错误:以 account 为 key,展示在对应行下方
+  const [deleteError, setDeleteError] = useState<{ account: string; message: string } | null>(null);
+  // 行内删除请求中:防重复点击
+  const [deleting, setDeleting] = useState<string | null>(null);
 
   async function refresh() {
     try {
@@ -40,9 +47,24 @@ export function Users() {
     void refresh();
   }, []);
 
-  function handleLogout() {
-    clearLogin();
-    navigate("/login", { replace: true });
+  async function handleDeleteConfirm(account: string) {
+    setDeleting(account);
+    setDeleteError(null);
+    try {
+      await deleteUser(account);
+      setConfirmDelete(null);
+      setDeleteError(null);
+      await refresh();
+    } catch (e) {
+      // 失败:退出确认态(让用户能重试),但保留错误展示
+      setConfirmDelete(null);
+      setDeleteError({
+        account,
+        message: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setDeleting(null);
+    }
   }
 
   return (
@@ -57,15 +79,6 @@ export function Users() {
             style={{ padding: "6px 16px", fontSize: 13 }}
           >
             + 新增用户
-          </button>
-          <button
-            type="button"
-            data-testid="logout-button"
-            onClick={handleLogout}
-            className="btn-secondary"
-            style={{ padding: "6px 16px", fontSize: 13 }}
-          >
-            退出登录
           </button>
         </div>
       </div>
@@ -101,25 +114,86 @@ export function Users() {
           <thead>
             <tr>
               <th>账号</th>
-              <th style={{ width: 140 }}>操作</th>
+              <th style={{ width: 220 }}>操作</th>
             </tr>
           </thead>
           <tbody>
             {users.map((u) => {
               const isSelf = u.account === getLoggedInAccount();
+              const isConfirming = confirmDelete === u.account;
+              const rowDeleteError = deleteError?.account === u.account ? deleteError.message : null;
               return (
                 <tr key={u.account} data-testid={`user-row-${u.account}`}>
-                  <td>{u.account}{isSelf && <span style={{ marginLeft: 6, color: "var(--text-muted)", fontSize: 12 }}>(我)</span>}</td>
                   <td>
-                    <button
-                      type="button"
-                      data-testid={`change-pw-button-${u.account}`}
-                      onClick={() => setChangeTarget(u.account)}
-                      className="btn-secondary"
-                      style={{ padding: "4px 10px", fontSize: 12 }}
-                    >
-                      修改密码
-                    </button>
+                    {u.account}
+                    {isSelf && <span style={{ marginLeft: 6, color: "var(--text-muted)", fontSize: 12 }}>(我)</span>}
+                    {rowDeleteError && (
+                      <div
+                        data-testid={`delete-error-${u.account}`}
+                        style={{ fontSize: 12, color: "#991b1b", marginTop: 4 }}
+                      >
+                        ✗ {rowDeleteError}
+                      </div>
+                    )}
+                  </td>
+                  <td>
+                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                      <button
+                        type="button"
+                        data-testid={`change-pw-button-${u.account}`}
+                        onClick={() => setChangeTarget(u.account)}
+                        className="btn-secondary"
+                        style={{ padding: "4px 10px", fontSize: 12 }}
+                      >
+                        修改密码
+                      </button>
+                      {/* 删除按钮:自己不能删自己(getLoggedInAccount 命中的那行不渲染) */}
+                      {!isSelf && !isConfirming && (
+                        <button
+                          type="button"
+                          data-testid={`delete-user-${u.account}`}
+                          onClick={() => {
+                            setDeleteError(null);
+                            setConfirmDelete(u.account);
+                          }}
+                          className="btn-secondary"
+                          style={{ padding: "4px 10px", fontSize: 12 }}
+                        >
+                          删除
+                        </button>
+                      )}
+                      {!isSelf && isConfirming && (
+                        <>
+                          <button
+                            type="button"
+                            data-testid={`delete-confirm-${u.account}`}
+                            onClick={() => handleDeleteConfirm(u.account)}
+                            disabled={deleting === u.account}
+                            style={{
+                              padding: "4px 10px", fontSize: 12,
+                              background: deleting === u.account ? "#e5e7eb" : "#dc2626",
+                              color: deleting === u.account ? "#9ca3af" : "white",
+                              border: "none", borderRadius: 4,
+                              cursor: deleting === u.account ? "not-allowed" : "pointer",
+                            }}
+                          >
+                            {deleting === u.account ? "删除中..." : "确认删除"}
+                          </button>
+                          <button
+                            type="button"
+                            data-testid={`delete-cancel-${u.account}`}
+                            onClick={() => {
+                              setConfirmDelete(null);
+                              setDeleteError(null);
+                            }}
+                            className="btn-secondary"
+                            style={{ padding: "4px 10px", fontSize: 12 }}
+                          >
+                            取消
+                          </button>
+                        </>
+                      )}
+                    </div>
                   </td>
                 </tr>
               );

@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import { Link } from "react-router-dom";
 import { CRMQuery } from "@/query";
 import type { Site, WechatBindPollResult } from "@/query/types";
 
@@ -274,40 +273,6 @@ export function Settings() {
   );
 }
 
-// 用户管理入口:邮箱 tab 顶部一个 section,放一个跳到 /settings/users 的链接卡片
-function UserManagementEntry() {
-  return (
-    <section
-      data-testid="user-management-entry"
-      style={{
-        background: "white", border: "1px solid var(--border)",
-        borderRadius: 8, padding: 16,
-      }}
-    >
-      <h3 style={{ fontSize: 14, fontWeight: 600, color: "var(--text-muted)", marginBottom: 8 }}>
-        用户管理
-      </h3>
-      <div style={{ fontSize: 13, color: "var(--text)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-        <span>新增用户、修改密码、退出登录等账号管理操作。</span>
-        <Link
-          to="/settings/users"
-          data-testid="user-management-link"
-          style={{
-            padding: "6px 14px",
-            background: "var(--primary)",
-            color: "white",
-            borderRadius: 4,
-            fontSize: 13,
-            whiteSpace: "nowrap",
-          }}
-        >
-          进入用户管理 →
-        </Link>
-      </div>
-    </section>
-  );
-}
-
 // 邮件配置 tab：所有字段常驻可编辑，底部统一保存/取消。
 // - 内部维护 draft(每个 EDITABLE_KEYS 一个 string)
 // - dirty 检测:draft 任何一项 != initialConfig 对应项 → 启用保存/取消
@@ -365,8 +330,6 @@ function EmailConfigTab({
 
   return (
     <div style={{ display: "grid", gap: 16 }}>
-      <UserManagementEntry />
-
       <EditableSection title="SMTP 服务（发件）" testId="smtp">
         <FieldRow label="服务器" type="text" value={draft.SMTP_HOST} onChange={(v) => setField("SMTP_HOST", v)} testId="smtp-host" />
         <FieldRow label="端口" type="text" value={draft.SMTP_PORT} onChange={(v) => setField("SMTP_PORT", v)} testId="smtp-port" />

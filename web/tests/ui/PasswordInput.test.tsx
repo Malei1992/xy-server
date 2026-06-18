@@ -49,6 +49,26 @@ describe("PasswordInput", () => {
     expect(input.type).toBe("password");
   });
 
+  it("toggle 内部渲染 SVG(无 emoji 字符),aria-label 随状态切换", () => {
+    render(<PasswordInput value="x" onChange={() => {}} />);
+    const toggle = screen.getByTestId("password-toggle");
+    // 初始(隐藏态):aria-label 是 "显示密码",且 toggle 内含一个 svg
+    expect(toggle).toHaveAttribute("aria-label", "显示密码");
+    expect(toggle.querySelector("svg")).toBeInTheDocument();
+    // 不应该出现旧的 emoji 字符 👁 / 🙈
+    expect(toggle.textContent).not.toMatch(/[👁🙈]/);
+
+    fireEvent.click(toggle);
+    // 切到显示态:aria-label 切到 "隐藏密码"
+    expect(toggle).toHaveAttribute("aria-label", "隐藏密码");
+    expect(toggle.querySelector("svg")).toBeInTheDocument();
+    expect(toggle.textContent).not.toMatch(/[👁🙈]/);
+
+    fireEvent.click(toggle);
+    // 切回隐藏态
+    expect(toggle).toHaveAttribute("aria-label", "显示密码");
+  });
+
   it("外部传入 data-testid 覆盖默认的 password-input", () => {
     render(
       <PasswordInput

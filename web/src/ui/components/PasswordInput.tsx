@@ -80,7 +80,40 @@ export function PasswordInput({
           lineHeight: 1,
         }}
       >
-        {visible ? "🙈" : "👁"}
+        {visible ? (
+          // 显示态(密码可见):睁眼 — 眼睑弧线 + 中心瞳孔
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5z" />
+            <circle cx="8" cy="8" r="2" />
+          </svg>
+        ) : (
+          // 隐藏态(密码不可见):眼睛被斜线划掉 — 眼睑弧线 + 中心瞳孔 + 斜杠
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5z" />
+            <circle cx="8" cy="8" r="2" />
+            <line x1="2" y1="14" x2="14" y2="2" />
+          </svg>
+        )}
       </button>
     </span>
   );

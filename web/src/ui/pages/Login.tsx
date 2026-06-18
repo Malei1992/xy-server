@@ -90,7 +90,7 @@ export function Login() {
             textAlign: "center",
           }}
         >
-          星月 CRM
+          星月管理系统
         </h2>
 
         <label style={fieldStyle}>

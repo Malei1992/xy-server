@@ -64,6 +64,21 @@ async function getJSON<T>(path: string): Promise<T> {
   return (await res.json()) as T;
 }
 
+// 通用 DELETE 辅助:走 /api/*,失败抛 CRMFetchError(message 取 body.error)
+// 成功后不解析 body(后端可能返 200 + 空 / 204),调用方按需解析
+async function deleteJSON(path: string): Promise<void> {
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE_URL}${path}`, { method: "DELETE" });
+  } catch (err) {
+    throw new CRMFetchError(path, 0, `网络错误: ${(err as Error).message}`);
+  }
+  if (!res.ok) {
+    const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new CRMFetchError(path, res.status, errBody?.error ?? `HTTP ${res.status}`);
+  }
+}
+
 // POST /api/login
 // 200 → { ok: true, account }
 // 401 → 账号或密码错(后端 body.error = "账号或密码错误")
@@ -96,4 +111,12 @@ export function changePassword(
   req: ChangePasswordRequest,
 ): Promise<{ ok: true }> {
   return patchJSON<{ ok: true }>(`/users/${encodeURIComponent(account)}`, req);
+}
+
+// DELETE /api/users/:account
+// 200/204 → 成功
+// 404 → 账号不存在
+// 409 → 不能删自己(后端兜底,前端 UI 已拦截)
+export function deleteUser(account: string): Promise<void> {
+  return deleteJSON(`/users/${encodeURIComponent(account)}`);
 }

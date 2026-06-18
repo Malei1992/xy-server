@@ -1,32 +1,35 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
-import { Users } from "@/ui/pages/Settings/Users";
+import { Users } from "@/ui/pages/Users";
 
 // mock query/users 整个模块
-const { mockListUsers, mockCreateUser, mockChangePassword } = vi.hoisted(() => ({
+const { mockListUsers, mockCreateUser, mockChangePassword, mockDeleteUser } = vi.hoisted(() => ({
   mockListUsers: vi.fn(),
   mockCreateUser: vi.fn(),
   mockChangePassword: vi.fn(),
+  mockDeleteUser: vi.fn(),
 }));
 vi.mock("@/query/users", () => ({
   listUsers: mockListUsers,
   createUser: mockCreateUser,
   changePassword: mockChangePassword,
+  deleteUser: mockDeleteUser,
 }));
 
 beforeEach(() => {
   mockListUsers.mockReset();
   mockCreateUser.mockReset();
   mockChangePassword.mockReset();
+  mockDeleteUser.mockReset();
   localStorage.clear();
 });
 
-function renderUsers(initialPath = "/settings/users") {
+function renderUsers(initialPath = "/users") {
   return render(
     <MemoryRouter initialEntries={[initialPath]}>
       <Routes>
-        <Route path="/settings/users" element={<Users />} />
+        <Route path="/users" element={<Users />} />
         <Route path="/login" element={<div>LOGIN_PAGE</div>} />
         <Route path="/settings" element={<div>SETTINGS_PAGE</div>} />
       </Routes>
@@ -34,7 +37,7 @@ function renderUsers(initialPath = "/settings/users") {
   );
 }
 
-describe("Settings/Users - 列表渲染", () => {
+describe("Users - 列表渲染", () => {
   it("进入页面立即调 listUsers,展示返回的账号行 + 顶部按钮", async () => {
     mockListUsers.mockResolvedValue([{ account: "admin" }, { account: "alice" }]);
     renderUsers();
@@ -43,9 +46,10 @@ describe("Settings/Users - 列表渲染", () => {
     });
     expect(await screen.findByTestId("user-row-admin")).toHaveTextContent("admin");
     expect(screen.getByTestId("user-row-alice")).toHaveTextContent("alice");
-    // 顶部按钮都在
+    // 顶部「新增用户」按钮在
     expect(screen.getByTestId("add-user-button")).toBeInTheDocument();
-    expect(screen.getByTestId("logout-button")).toBeInTheDocument();
+    // 退出登录按钮已迁移到 Layout,Users 页不再渲染
+    expect(screen.queryByTestId("logout-button")).not.toBeInTheDocument();
   });
 
   it("listUsers 失败:展示错误 + 不渲染表格", async () => {
@@ -67,25 +71,7 @@ describe("Settings/Users - 列表渲染", () => {
   });
 });
 
-describe("Settings/Users - 退出登录", () => {
-  it("点退出:清 localStorage + 跳 /login", async () => {
-    localStorage.setItem("crm_logged_in", "true");
-    localStorage.setItem("crm_account", "admin");
-    mockListUsers.mockResolvedValue([{ account: "admin" }]);
-    renderUsers();
-    await screen.findByTestId("user-row-admin");
-
-    fireEvent.click(screen.getByTestId("logout-button"));
-
-    await waitFor(() => {
-      expect(localStorage.getItem("crm_logged_in")).toBeNull();
-      expect(localStorage.getItem("crm_account")).toBeNull();
-      expect(screen.getByText("LOGIN_PAGE")).toBeInTheDocument();
-    });
-  });
-});
-
-describe("Settings/Users - 新增用户弹窗", () => {
+describe("Users - 新增用户弹窗", () => {
   it("点新增:弹窗出现,提交后调 createUser,成功后列表刷新且弹窗关闭", async () => {
     mockListUsers.mockResolvedValue([{ account: "admin" }]);
     mockCreateUser.mockResolvedValue({ ok: true, account: "alice" });
@@ -149,7 +135,7 @@ describe("Settings/Users - 新增用户弹窗", () => {
   });
 });
 
-describe("Settings/Users - 修改密码弹窗", () => {
+describe("Users - 修改密码弹窗", () => {
   it("点某行的修改密码:弹窗出现,新密码两次一致 + 旧密码非空 → 调 changePassword", async () => {
     mockListUsers.mockResolvedValue([{ account: "admin" }]);
     mockChangePassword.mockResolvedValue({ ok: true });
@@ -216,5 +202,111 @@ describe("Settings/Users - 修改密码弹窗", () => {
     fireEvent.click(screen.getByTestId("change-pw-cancel"));
     expect(screen.queryByTestId("change-pw-modal")).not.toBeInTheDocument();
     expect(mockChangePassword).not.toHaveBeenCalled();
+  });
+});
+
+describe("Users - 删除用户", () => {
+  it("当前账号那行不渲染删除按钮(也不显示(我)标记以外的差异)", async () => {
+    // 设置登录态为 admin
+    localStorage.setItem("crm_logged_in", "true");
+    localStorage.setItem("crm_account", "admin");
+    mockListUsers.mockResolvedValue([{ account: "admin" }, { account: "alice" }]);
+    renderUsers();
+    await screen.findByTestId("user-row-admin");
+    // admin 行没有删除按钮
+    expect(screen.queryByTestId("delete-user-admin")).not.toBeInTheDocument();
+    // alice 行有
+    expect(screen.getByTestId("delete-user-alice")).toBeInTheDocument();
+  });
+
+  it("未登录态(getLoggedInAccount 返回 null)时所有行都渲染删除按钮", async () => {
+    // 不设 localStorage
+    mockListUsers.mockResolvedValue([{ account: "admin" }, { account: "alice" }]);
+    renderUsers();
+    await screen.findByTestId("user-row-admin");
+    expect(screen.getByTestId("delete-user-admin")).toBeInTheDocument();
+    expect(screen.getByTestId("delete-user-alice")).toBeInTheDocument();
+  });
+
+  it("点删除按钮 → 出现 inline 确认(确认/取消),点取消确认消失 + 不发请求", async () => {
+    mockListUsers.mockResolvedValue([{ account: "admin" }, { account: "alice" }]);
+    renderUsers();
+    await screen.findByTestId("user-row-alice");
+
+    fireEvent.click(screen.getByTestId("delete-user-alice"));
+    // inline 确认 UI 出现
+    expect(screen.getByTestId("delete-confirm-alice")).toBeInTheDocument();
+    expect(screen.getByTestId("delete-cancel-alice")).toBeInTheDocument();
+    // 确认期间,原删除按钮隐藏(被「确认」取代)
+    expect(screen.queryByTestId("delete-user-alice")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("delete-cancel-alice"));
+    // 确认 UI 消失,原删除按钮回来
+    await waitFor(() => {
+      expect(screen.queryByTestId("delete-confirm-alice")).not.toBeInTheDocument();
+    });
+    expect(screen.getByTestId("delete-user-alice")).toBeInTheDocument();
+    // 没发 deleteUser 请求
+    expect(mockDeleteUser).not.toHaveBeenCalled();
+  });
+
+  it("点确认 → 调 deleteUser + 列表刷新(成功后该行消失)", async () => {
+    // 第一次 listUsers 返回 2 个;删除后第二次 listUsers 返回 1 个
+    mockListUsers
+      .mockResolvedValueOnce([{ account: "admin" }, { account: "alice" }])
+      .mockResolvedValueOnce([{ account: "admin" }]);
+    mockDeleteUser.mockResolvedValue(undefined);
+    renderUsers();
+    await screen.findByTestId("user-row-alice");
+
+    fireEvent.click(screen.getByTestId("delete-user-alice"));
+    fireEvent.click(screen.getByTestId("delete-confirm-alice"));
+
+    await waitFor(() => {
+      expect(mockDeleteUser).toHaveBeenCalledWith("alice");
+    });
+    // 列表刷新后 alice 行消失
+    await waitFor(() => {
+      expect(screen.queryByTestId("user-row-alice")).not.toBeInTheDocument();
+    });
+    expect(screen.getByTestId("user-row-admin")).toBeInTheDocument();
+    // 只调了 2 次 listUsers(初次 + 刷新)
+    expect(mockListUsers).toHaveBeenCalledTimes(2);
+  });
+
+  it("删除失败(mock 抛错)→ 行内错误显示,该行不消失,不发新的 listUsers", async () => {
+    mockListUsers.mockResolvedValue([{ account: "admin" }, { account: "alice" }]);
+    mockDeleteUser.mockRejectedValue(new Error("账号不存在"));
+    renderUsers();
+    await screen.findByTestId("user-row-alice");
+
+    fireEvent.click(screen.getByTestId("delete-user-alice"));
+    fireEvent.click(screen.getByTestId("delete-confirm-alice"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("delete-error-alice")).toHaveTextContent("账号不存在");
+    });
+    // 行还在
+    expect(screen.getByTestId("user-row-alice")).toBeInTheDocument();
+    // 确认 UI 已清除,可以重新点
+    expect(screen.getByTestId("delete-user-alice")).toBeInTheDocument();
+    // 只调了 1 次 listUsers(初次),失败没刷新
+    expect(mockListUsers).toHaveBeenCalledTimes(1);
+  });
+
+  it("删除错误后,再点删除按钮(确认状态清空)→ 旧错误消失", async () => {
+    mockListUsers.mockResolvedValue([{ account: "alice" }]);
+    mockDeleteUser.mockRejectedValue(new Error("boom"));
+    renderUsers();
+    await screen.findByTestId("user-row-alice");
+
+    fireEvent.click(screen.getByTestId("delete-user-alice"));
+    fireEvent.click(screen.getByTestId("delete-confirm-alice"));
+    await screen.findByTestId("delete-error-alice");
+
+    // 再点删除按钮(应该清错误,重新进入确认)
+    fireEvent.click(screen.getByTestId("delete-user-alice"));
+    expect(screen.queryByTestId("delete-error-alice")).not.toBeInTheDocument();
+    expect(screen.getByTestId("delete-confirm-alice")).toBeInTheDocument();
   });
 });
