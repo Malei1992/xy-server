@@ -334,6 +334,43 @@ export interface Opportunity {
   notes?: string;
 }
 
+// ----- 用户与登录 -----
+
+// 登录请求 body：账号 + 密码
+// 成功：200 + { ok: true, account: string }
+// 失败：400 校验 / 401 账号或密码错 / 404 账号不存在
+export interface LoginRequest {
+  account: string;
+  password: string;
+}
+
+// 登录成功响应：ok=true + 返回的 account（用于前端写入 localStorage）
+export interface LoginResponse {
+  ok: true;
+  account: string;
+}
+
+// GET /api/users 响应中的单条记录：只含账号（后端不返密码）
+export interface UserListItem {
+  account: string;
+}
+
+// 新建用户请求 body
+// 失败：400 校验 / 409 账号已存在
+export interface CreateUserRequest {
+  account: string;
+  password: string;
+}
+
+// 修改密码请求 body（PATCH /api/users/:account）
+// 前端先校验 newPassword === confirmNewPassword 再发请求
+// 失败：400 校验 / 401 旧密码错 / 404 账号不存在
+export interface ChangePasswordRequest {
+  oldPassword: string;
+  newPassword: string;
+  confirmNewPassword: string;
+}
+
 // ----- 微信绑定 -----
 
 // POST /api/wechat/bind 同步成功响应（已废弃，新协议走异步，见下）

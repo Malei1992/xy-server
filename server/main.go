@@ -88,9 +88,20 @@ func main() {
 		// 微信绑定取消:用户关闭 modal 时前端调这个端点,主动 SIGKILL exec 进程组,
 		// 免等 2 分钟 timeout 兜底。终态 / 不存在 task 返 200/404,具体语义看 handler。
 		api.POST("/wechat/bind/:task_id/cancel", handlers.PostWechatBindCancel())
+		// 登录 + 用户管理:明文账号密码,无 token,前端 gate 整个 App
+		api.POST("/login", handlers.PostLogin(UsersFilePath))
+		api.GET("/users", handlers.GetUsers(UsersFilePath))
+		api.POST("/users", handlers.PostUser(UsersFilePath))
+		api.PATCH("/users/:account", handlers.PatchUser(UsersFilePath))
 	}
 
 	addr := ListenAddr
+
+	// 启动时 seed 默认 admin 账号(文件不存在或空时写入)
+	if err := handlers.SeedDefaultAdmin(UsersFilePath); err != nil {
+		log.Fatalf("seed default admin: %v", err)
+	}
+
 	if err := r.Run(addr); err != nil {
 		log.Fatalf("server exited: %v", err)
 	}

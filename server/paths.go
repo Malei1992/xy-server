@@ -75,4 +75,8 @@ const (
 	//   - <BASE_DIR>/openclaw-weixin/accounts.json
 	// 不在常量里硬编码,因为 handlers/ 包拿不到 package main 的常量,
 	// 这俩路径在 main.go 调用 PostWechatBind 时直接用 BASE_DIR 拼出。
+
+	// UsersFilePath 登录用户账本路径(相对 cwd,沿用项目"写死路径"风格)。
+	// 格式:`{"<account>": "<password>"}` 平铺键值对。
+	UsersFilePath = "./users.json"
 )
