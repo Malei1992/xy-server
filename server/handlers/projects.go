@@ -23,6 +23,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -141,4 +143,76 @@ func lookupCustomer(customersDir, customerID string) *customerLookup {
 		return nil
 	}
 	return &cust
+}
+
+// validProjectStatuses 是 project status 字段的合法枚举。
+// 跟前端 web/src/query/types.ts 的 ProjectStatus 保持一致;改前端枚举时这里要同步改。
+var validProjectStatuses = map[string]bool{
+	"跟进中": true,
+	"谈判中": true,
+	"签约中": true,
+	"已落地": true,
+	"已关闭": true,
+}
+
+// PatchProjectStatus 处理 PATCH /api/projects/:id/status,改 project JSON 的 status 字段。
+//   - id 不以 PRJ 开头 → 400(防 path traversal / 写错目录)
+//   - body 非法 / status 不在枚举内 → 400
+//   - 文件不存在 / 损坏 → 404(对齐 spec:读失败或 unmarshal 失败 → 404)
+//   - 成功 → 200 {ok:true, status:<new>},文件内 status 已变 + updated_at 更新到 now
+//
+// 写盘流程对齐 openclaw_config.go:.tmp + rename,失败清理 .tmp。
+// 串行化由 WriteProject 内部 projectsMu 保证,handler 不再加锁(避免与 read 死锁)。
+func PatchProjectStatus(crmDir, projectsRelDir string) gin.HandlerFunc {
+	dir := filepath.Join(crmDir, projectsRelDir)
+	return func(c *gin.Context) {
+		id := c.Param("id")
+		if !strings.HasPrefix(id, projectIDPrefix) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "id 必须以 PRJ- 开头"})
+			return
+		}
+
+		var req struct {
+			Status string `json:"status"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json body"})
+			return
+		}
+		if !validProjectStatuses[req.Status] {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "status 必须是: 跟进中 / 谈判中 / 签约中 / 已落地 / 已关闭"})
+			return
+		}
+
+		// 读 → 改 → 写。ReadProjects 会跳过损坏 / 不以 PRJ 开头的文件,id 不存在 → 返空 slice
+		projects, err := ReadProjects(dir)
+		if err != nil {
+			L.Error("patch project: read dir failed", zap.String("dir", dir), zap.Error(err))
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "read projects: " + err.Error()})
+			return
+		}
+		var target *Project
+		for i := range projects {
+			if projects[i].ID == id {
+				target = &projects[i]
+				break
+			}
+		}
+		if target == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "project " + id + " not found"})
+			return
+		}
+
+		target.Status = req.Status
+		target.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+
+		if err := WriteProject(dir, *target); err != nil {
+			L.Error("patch project: write failed", zap.String("id", id), zap.Error(err))
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "write project: " + err.Error()})
+			return
+		}
+
+		L.Info("patch project status", zap.String("id", id), zap.String("status", req.Status))
+		c.JSON(http.StatusOK, gin.H{"ok": true, "status": req.Status})
+	}
 }

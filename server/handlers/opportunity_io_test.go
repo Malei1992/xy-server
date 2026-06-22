@@ -2,10 +2,13 @@ package handlers
 
 // 本文件：opportunity_io.go 的单元测试。
 // 覆盖 ReadOpportunities：缺目录 / 空目录 / 多文件 / 损坏文件 / 非 .json 文件 / 子目录 / 空文件 / 中文 round-trip / 前缀过滤。
+// 覆盖 WriteOpportunity：创建新文件 / 覆盖旧文件 / 并发写不损坏。
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -219,6 +222,122 @@ func TestReadOpportunitiesEmptyWhenAllNonOPP(t *testing.T) {
 	}
 	if len(opps) != 0 {
 		t.Errorf("want 0, got %d: %v", len(opps), opps)
+	}
+}
+
+// ===== WriteOpportunity 原子写 + mutex 保护 =====
+
+// 11. 写一个新文件 → 读出来字段对得上
+func TestWriteOpportunity_CreatesNewFile(t *testing.T) {
+	dir := t.TempDir()
+	opp := Opportunity{
+		ID:              "OPP-1",
+		OpportunityName: "正大新厂",
+		SourceType:      "新闻搜索",
+		Status:          "待评估",
+		UpdatedAt:       "2026-06-22T10:00:00Z",
+	}
+
+	if err := WriteOpportunity(dir, opp); err != nil {
+		t.Fatalf("WriteOpportunity: %v", err)
+	}
+
+	opps, err := ReadOpportunities(dir)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(opps) != 1 {
+		t.Fatalf("want 1, got %d", len(opps))
+	}
+	if opps[0].ID != "OPP-1" {
+		t.Errorf("id = %q, want OPP-1", opps[0].ID)
+	}
+	if opps[0].Status != "待评估" {
+		t.Errorf("status = %q, want 待评估", opps[0].Status)
+	}
+	if opps[0].OpportunityName != "正大新厂" {
+		t.Errorf("opportunity_name = %q, want 正大新厂", opps[0].OpportunityName)
+	}
+}
+
+// 12. 覆盖已存在的文件 → 新内容生效
+func TestWriteOpportunity_OverwritesExisting(t *testing.T) {
+	dir := t.TempDir()
+	old := Opportunity{ID: "OPP-1", OpportunityName: "旧", SourceType: "新闻搜索", Status: "待评估", UpdatedAt: "2026-06-15T10:00:00Z"}
+	if err := WriteOpportunity(dir, old); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	newOpp := Opportunity{ID: "OPP-1", OpportunityName: "新", SourceType: "新闻搜索", Status: "已转化", UpdatedAt: "2026-06-22T10:00:00Z"}
+	if err := WriteOpportunity(dir, newOpp); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+
+	opps, err := ReadOpportunities(dir)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(opps) != 1 {
+		t.Fatalf("want 1, got %d", len(opps))
+	}
+	if opps[0].Status != "已转化" {
+		t.Errorf("status = %q, want 已转化", opps[0].Status)
+	}
+	if opps[0].OpportunityName != "新" {
+		t.Errorf("opportunity_name = %q, want 新", opps[0].OpportunityName)
+	}
+}
+
+// 13. 并发写同一个 id 不会损坏文件(`-race` 配合看)
+func TestWriteOpportunity_ConcurrentSameID(t *testing.T) {
+	dir := t.TempDir()
+	const goroutines = 8
+	const opsPerG = 25
+
+	statuses := []string{"待评估", "跟进中", "已转化", "已关闭"}
+
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		g := g
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < opsPerG; i++ {
+				opp := Opportunity{
+					ID:         "OPP-shared",
+					SourceType: "新闻搜索",
+					Status:     statuses[(g+i)%len(statuses)],
+					UpdatedAt:  "2026-06-22T10:00:00Z",
+				}
+				if err := WriteOpportunity(dir, opp); err != nil {
+					t.Errorf("WriteOpportunity g=%d i=%d: %v", g, i, err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	data, err := os.ReadFile(filepath.Join(dir, "OPP-shared.json"))
+	if err != nil {
+		t.Fatalf("read final file: %v", err)
+	}
+	var opp Opportunity
+	if err := json.Unmarshal(data, &opp); err != nil {
+		t.Fatalf("parse final file: %v; raw=%s", err, data)
+	}
+	if opp.ID != "OPP-shared" {
+		t.Errorf("id = %q, want OPP-shared", opp.ID)
+	}
+	valid := false
+	for _, s := range statuses {
+		if opp.Status == s {
+			valid = true
+			break
+		}
+	}
+	if !valid {
+		t.Errorf("status = %q, want one of %v", opp.Status, statuses)
 	}
 }
 

@@ -9,6 +9,7 @@ package handlers
 //   - JSON 损坏文件 / 空文件 / 非 .json / 子目录 / 不以 OPP 开头 → 跳过，不影响其他文件
 //   - 返回非 nil slice（避免 JSON 序列化为 null）
 //   - 排序按 id 升序
+//   - 写文件：opportunitiesMu 串行化 + 原子写（.tmp + rename），失败清理 .tmp
 
 import (
 	"encoding/json"
@@ -16,7 +17,13 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 )
+
+// opportunitiesMu 序列化对 crm/opportunities/*.json 的并发写。
+// 沿用 openclaw_config.go 的全局单锁模式：read-modify-write 不丢更新；rename 失败时 .tmp 清理。
+// 三个实体（project / task / opportunity）各自一个 mutex，互不阻塞。
+var opportunitiesMu sync.Mutex
 
 // 公开信息文件名 / id 的约定前缀（与 schema.md 中 opportunity id 格式一致）。
 // 商机目录里非 OPP 开头的 .json 不视为商机记录：list 跳过。
@@ -89,4 +96,16 @@ func ReadOpportunities(dirPath string) ([]Opportunity, error) {
 		return out[i].ID < out[j].ID
 	})
 	return out, nil
+}
+
+// WriteOpportunity 原子写单条 opportunity 到 dirPath/{id}.json。
+//   - dirPath 不存在 → MkdirAll 自动创建
+//   - 先写 <path>.tmp，再 rename 到 <path>；rename 失败时清理 .tmp
+//   - 由 opportunitiesMu 串行化，避免并发 read-modify-write 互相覆盖
+//
+// 仅供 PatchOpportunityStatus / 后续 opportunity 写操作使用；现有 read 路径（ReadOpportunities）不受影响。
+func WriteOpportunity(dirPath string, o Opportunity) error {
+	opportunitiesMu.Lock()
+	defer opportunitiesMu.Unlock()
+	return writeJSONFile(dirPath, o.ID+".json", o)
 }

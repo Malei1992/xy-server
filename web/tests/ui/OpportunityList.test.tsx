@@ -1,12 +1,16 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { OpportunityList } from "@/ui/pages/OpportunityList";
 
-const { mockList } = vi.hoisted(() => ({ mockList: vi.fn() }));
+const { mockList, mockUpdateStatus } = vi.hoisted(() => ({
+  mockList: vi.fn(),
+  mockUpdateStatus: vi.fn(),
+}));
 vi.mock("@/query", () => ({
   CRMQuery: vi.fn().mockImplementation(() => ({
     listOpportunities: mockList,
+    updateOpportunityStatus: mockUpdateStatus,
   })),
 }));
 
@@ -152,5 +156,48 @@ describe("OpportunityList", () => {
     render(<MemoryRouter><OpportunityList /></MemoryRouter>);
     await waitFor(() => screen.getByText("Siam Cement"));
     fireEvent.click(screen.getByText("Siam Cement"));
+  });
+});
+
+describe("OpportunityList 内联状态修改", () => {
+  beforeEach(() => {
+    mockUpdateStatus.mockReset();
+    mockList.mockReset();
+  });
+
+  it("status 列渲染 InlineStatusSelect(<select> per row)", async () => {
+    mockList.mockResolvedValue([O1, O2]);
+    render(<MemoryRouter><OpportunityList /></MemoryRouter>);
+    await waitFor(() => screen.getByText("泰国正大集团拟新建食品加工厂"));
+    const selects = screen.getAllByTestId("status-select") as HTMLSelectElement[];
+    expect(selects).toHaveLength(2);
+    expect(selects[0].value).toBe("待评估");
+    expect(selects[1].value).toBe("跟进中");
+  });
+
+  it("改 status select → 调 updateOpportunityStatus + 列表该行 status 更新", async () => {
+    mockUpdateStatus.mockResolvedValue({ ok: true, status: "跟进中" });
+    mockList.mockResolvedValue([O1]);
+    render(<MemoryRouter><OpportunityList /></MemoryRouter>);
+    await waitFor(() => screen.getByText("泰国正大集团拟新建食品加工厂"));
+    fireEvent.change(screen.getByTestId("status-select"), { target: { value: "跟进中" } });
+    await waitFor(() => {
+      expect(mockUpdateStatus).toHaveBeenCalledWith("OPP-1", "跟进中");
+    });
+    await waitFor(() => {
+      expect((screen.getByTestId("status-select") as HTMLSelectElement).value).toBe("跟进中");
+    });
+  });
+
+  it("失败时 select 还原原值 + InlineStatusSelect 自身展示错误", async () => {
+    mockUpdateStatus.mockRejectedValue(new Error("HTTP 404 opportunity not found"));
+    mockList.mockResolvedValue([O1]);
+    render(<MemoryRouter><OpportunityList /></MemoryRouter>);
+    await waitFor(() => screen.getByText("泰国正大集团拟新建食品加工厂"));
+    fireEvent.change(screen.getByTestId("status-select"), { target: { value: "已转化" } });
+    await waitFor(() => {
+      expect(screen.getByTestId("status-select-error")).toHaveTextContent(/opportunity not found/);
+    });
+    expect((screen.getByTestId("status-select") as HTMLSelectElement).value).toBe("待评估");
   });
 });

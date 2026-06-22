@@ -68,10 +68,13 @@ func main() {
 		api.DELETE("/target-sites", handlers.DeleteSite(CRMDataDir, TargetSitesRelPath))
 		// 商机信息：crm/projects/*.json + crm/customers/{id}.json 关联 join
 		api.GET("/projects", handlers.GetProjects(CRMDataDir, ProjectsRelDir, CustomersRelDir))
+		api.PATCH("/projects/:id/status", handlers.PatchProjectStatus(CRMDataDir, ProjectsRelDir))
 		// 代办任务：crm/tasks/*.json + crm/customers/{id}.json 关联 join
 		api.GET("/tasks", handlers.ListTasks(CRMDataDir, TasksRelDir, CustomersRelDir))
+		api.PATCH("/tasks/:id/status", handlers.PatchTaskStatus(CRMDataDir, TasksRelDir))
 		// 公开信息：crm/opportunities/*.json + crm/customers/{id}.json 关联 join
 		api.GET("/opportunities", handlers.ListOpportunities(CRMDataDir, OpportunitiesRelDir, CustomersRelDir))
+		api.PATCH("/opportunities/:id/status", handlers.PatchOpportunityStatus(CRMDataDir, OpportunitiesRelDir))
 		// 重启服务:先强删旧容器,再 docker compose up -d 拉起新容器
 		restartCmds := [][]string{
 			{"docker", "rm", "-f", DockerContainerName},

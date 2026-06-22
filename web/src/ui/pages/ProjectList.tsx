@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { CRMQuery } from "@/query";
-import type { Project } from "@/query/types";
+import type { Project, ProjectStatus } from "@/query/types";
+import { PROJECT_STATUS_OPTIONS } from "@/query/types";
 import { ProjectTable } from "../components/ProjectTable";
 
 const q = new CRMQuery();
@@ -48,6 +49,13 @@ export function ProjectList() {
     });
   }, [projects, search]);
 
+  // 内联状态修改:Table 通过 onStatusChange 调 PATCH,成功才更新本地 list
+  // 失败时 InlineStatusSelect 内部已展示错误,这里把 error throw 回去让 select 知道
+  const handleStatusChange = async (id: string, newStatus: ProjectStatus) => {
+    await q.updateProjectStatus(id, newStatus);
+    setProjects((prev) => prev.map((p) => (p.id === id ? { ...p, status: newStatus } : p)));
+  };
+
   return (
     <div style={{ padding: 24 }}>
       <div style={{
@@ -88,6 +96,8 @@ export function ProjectList() {
               <ProjectTable
                 projects={filtered}
                 onCustomerClick={(customerId) => navigate(`/customers/${encodeURIComponent(customerId)}`)}
+                statusOptions={PROJECT_STATUS_OPTIONS}
+                onStatusChange={handleStatusChange}
               />
             )}
       </div>

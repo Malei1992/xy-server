@@ -222,6 +222,18 @@ export interface Site {
 // 项目跟进状态枚举。状态机由后端 / 业务决定，前端只展示。
 export type ProjectStatus = "跟进中" | "谈判中" | "签约中" | "已落地" | "已关闭";
 
+// 项目状态下拉数据源(spec 2026-06-22 表格)
+// - 顺序 = 状态机推进顺序(跟进中 → 谈判中 → 签约中 → 已落地 → 已关闭)
+// - label 与 value 相同(项目状态本身就是中文)
+// - 用 ReadonlyArray + as const 保证类型推断稳定
+export const PROJECT_STATUS_OPTIONS: ReadonlyArray<{ value: ProjectStatus; label: string }> = [
+  { value: "跟进中", label: "跟进中" },
+  { value: "谈判中", label: "谈判中" },
+  { value: "签约中", label: "签约中" },
+  { value: "已落地", label: "已落地" },
+  { value: "已关闭", label: "已关闭" },
+] as const;
+
 // 单条商机记录（已 join 客户的展示字段）。
 // 与后端 handlers/projects.go 的 ProjectWithCustomer 一一对应。
 // customer_name / customer_email 在 customer_id 找不到客户时为空字符串。
@@ -271,6 +283,25 @@ export type TaskPriority = "P0" | "P1" | "P2" | "P3";
 // 任务状态枚举。状态机：pending → in_progress → resolved/dismissed。
 export type TaskStatus = "pending" | "in_progress" | "resolved" | "dismissed";
 
+// 任务状态下拉数据源(spec 2026-06-22 表格)
+// - value 是英文 enum(API 传输用)
+// - label 是中文(UI 展示用,跟 spec 表格一致)
+export const TASK_STATUS_OPTIONS: ReadonlyArray<{ value: TaskStatus; label: string }> = [
+  { value: "pending", label: "待处理" },
+  { value: "in_progress", label: "处理中" },
+  { value: "resolved", label: "已解决" },
+  { value: "dismissed", label: "已驳回" },
+] as const;
+
+// 任务状态英文 → 中文 的全局映射,方便列表页 cell 展示。
+// 跟 TASK_STATUS_OPTIONS 的 label 完全一致(放这里方便「只知道 enum,想转 label」的场景)。
+export const TASK_STATUS_LABELS: Record<TaskStatus, string> = {
+  pending: "待处理",
+  in_progress: "处理中",
+  resolved: "已解决",
+  dismissed: "已驳回",
+};
+
 // 单条代办任务记录（已 join 客户的展示字段）。
 // 与后端 handlers/tasks.go 的 TaskWithCustomer 一一对应。
 // customer_name 在 customer_id 找不到客户时为空字符串（前端展示「无」）。
@@ -313,6 +344,14 @@ export type OpportunityStatus =
   | "跟进中"
   | "已转化"
   | "已关闭";
+
+// 公开信息状态下拉数据源(spec 2026-06-22 表格)
+export const OPPORTUNITY_STATUS_OPTIONS: ReadonlyArray<{ value: OpportunityStatus; label: string }> = [
+  { value: "待评估", label: "待评估" },
+  { value: "跟进中", label: "跟进中" },
+  { value: "已转化", label: "已转化" },
+  { value: "已关闭", label: "已关闭" },
+] as const;
 
 // 单条公开信息记录（已 join 客户的展示字段）。
 // 与后端 handlers/opportunities.go 的 OpportunityWithCustomer 一一对应。

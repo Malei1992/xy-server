@@ -2,10 +2,13 @@ package handlers
 
 // 本文件：project_io.go 的单元测试。
 // 覆盖 ReadProjects：缺目录 / 空目录 / 多文件 / 损坏文件 / 非 .json 文件 / 子目录。
+// 覆盖 WriteProject：创建新文件 / 覆盖旧文件 / 自动建目录 / 并发写不损坏。
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -224,6 +227,151 @@ func TestReadProjectsEmptyWhenAllNonPRJ(t *testing.T) {
 	}
 	if len(projects) != 0 {
 		t.Errorf("want 0, got %d: %v", len(projects), projects)
+	}
+}
+
+// ===== WriteProject 原子写 + mutex 保护 =====
+
+// 11. 写一个新文件 → 读出来字段对得上
+func TestWriteProject_CreatesNewFile(t *testing.T) {
+	dir := t.TempDir()
+	p := Project{
+		ID:          "PRJ-1",
+		ProjectName: "项目1",
+		CustomerID:  "CUST-1",
+		Status:      "跟进中",
+		UpdatedAt:   "2026-06-22T10:00:00Z",
+	}
+
+	if err := WriteProject(dir, p); err != nil {
+		t.Fatalf("WriteProject: %v", err)
+	}
+
+	projects, err := ReadProjects(dir)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(projects) != 1 {
+		t.Fatalf("want 1, got %d", len(projects))
+	}
+	if projects[0].ID != "PRJ-1" {
+		t.Errorf("id = %q, want PRJ-1", projects[0].ID)
+	}
+	if projects[0].ProjectName != "项目1" {
+		t.Errorf("project_name = %q, want 项目1", projects[0].ProjectName)
+	}
+	if projects[0].Status != "跟进中" {
+		t.Errorf("status = %q, want 跟进中", projects[0].Status)
+	}
+}
+
+// 12. 覆盖一个已存在的文件 → 新内容生效,旧内容消失
+func TestWriteProject_OverwritesExisting(t *testing.T) {
+	dir := t.TempDir()
+	// 先写一个旧版本
+	oldP := Project{
+		ID:          "PRJ-1",
+		ProjectName: "旧项目",
+		CustomerID:  "CUST-1",
+		Status:      "跟进中",
+		UpdatedAt:   "2026-06-15T10:00:00Z",
+	}
+	if err := WriteProject(dir, oldP); err != nil {
+		t.Fatalf("seed WriteProject: %v", err)
+	}
+
+	// 再写新版本(同 id)
+	newP := Project{
+		ID:          "PRJ-1",
+		ProjectName: "新项目",
+		CustomerID:  "CUST-1",
+		Status:      "已落地",
+		UpdatedAt:   "2026-06-22T10:00:00Z",
+	}
+	if err := WriteProject(dir, newP); err != nil {
+		t.Fatalf("overwrite WriteProject: %v", err)
+	}
+
+	projects, err := ReadProjects(dir)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(projects) != 1 {
+		t.Fatalf("want 1 (no duplicate), got %d", len(projects))
+	}
+	if projects[0].ProjectName != "新项目" {
+		t.Errorf("project_name = %q, want 新项目", projects[0].ProjectName)
+	}
+	if projects[0].Status != "已落地" {
+		t.Errorf("status = %q, want 已落地", projects[0].Status)
+	}
+}
+
+// 13. 写不存在的目录 → 应自动创建
+func TestWriteProject_CreatesMissingDir(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "nested", "projects")
+	p := Project{ID: "PRJ-1", ProjectName: "x", Status: "跟进中", UpdatedAt: "2026-06-22T10:00:00Z"}
+
+	if err := WriteProject(dir, p); err != nil {
+		t.Fatalf("WriteProject: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "PRJ-1.json")); err != nil {
+		t.Errorf("file not created: %v", err)
+	}
+}
+
+// 14. 并发写同一个 id 不会损坏文件(`-race` 配合看)
+func TestWriteProject_ConcurrentSameID(t *testing.T) {
+	dir := t.TempDir()
+	const goroutines = 8
+	const opsPerG = 25
+
+	statuses := []string{"跟进中", "谈判中", "签约中", "已落地", "已关闭"}
+
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		g := g
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < opsPerG; i++ {
+				p := Project{
+					ID:        "PRJ-shared",
+					Status:    statuses[(g+i)%len(statuses)],
+					UpdatedAt: "2026-06-22T10:00:00Z",
+				}
+				if err := WriteProject(dir, p); err != nil {
+					t.Errorf("WriteProject g=%d i=%d: %v", g, i, err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	// 文件应仍可读且是合法 JSON
+	data, err := os.ReadFile(filepath.Join(dir, "PRJ-shared.json"))
+	if err != nil {
+		t.Fatalf("read final file: %v", err)
+	}
+	var p Project
+	if err := json.Unmarshal(data, &p); err != nil {
+		t.Fatalf("parse final file: %v; raw=%s", err, data)
+	}
+	if p.ID != "PRJ-shared" {
+		t.Errorf("id = %q, want PRJ-shared", p.ID)
+	}
+	// status 必须是合法枚举之一
+	valid := false
+	for _, s := range statuses {
+		if p.Status == s {
+			valid = true
+			break
+		}
+	}
+	if !valid {
+		t.Errorf("status = %q, want one of %v", p.Status, statuses)
 	}
 }
 

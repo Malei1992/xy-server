@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { CRMQuery } from "../../src/query";
-import type { Project } from "../../src/query/types";
+import type { Project, ProjectStatus } from "../../src/query/types";
 
 const P1: Project = {
   id: "PRJ-1",
@@ -72,5 +72,64 @@ describe("CRMQuery.listProjects", () => {
     }));
     const q = new CRMQuery("/api");
     await expect(q.listProjects()).rejects.toThrow(/HTTP 500/);
+  });
+});
+
+describe("CRMQuery.updateProjectStatus", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("PATCHes /api/projects/:id/status with the new status and returns ok payload", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 200, statusText: "OK",
+      json: () => Promise.resolve({ ok: true, status: "签约中" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const q = new CRMQuery("/api");
+    const res = await q.updateProjectStatus("PRJ-1", "签约中");
+    expect(res).toEqual({ ok: true, status: "签约中" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [calledUrl, calledInit] = fetchMock.mock.calls[0];
+    expect(calledUrl).toBe("/api/projects/PRJ-1/status");
+    expect(calledInit.method).toBe("PATCH");
+    expect(calledInit.headers["Content-Type"]).toBe("application/json");
+    expect(JSON.parse(calledInit.body)).toEqual({ status: "签约中" });
+  });
+
+  it("encodes the id in the URL", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 200, statusText: "OK",
+      json: () => Promise.resolve({ ok: true, status: "已关闭" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const q = new CRMQuery("/api");
+    await q.updateProjectStatus("PRJ/1 with space", "已关闭");
+    const [calledUrl] = fetchMock.mock.calls[0];
+    expect(calledUrl).toBe("/api/projects/PRJ%2F1%20with%20space/status");
+  });
+
+  it("throws on HTTP 4xx with backend error message", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: false, status: 400, statusText: "Bad Request",
+      json: () => Promise.resolve({ error: "status 不在枚举内" }),
+    }));
+    const q = new CRMQuery("/api");
+    await expect(q.updateProjectStatus("PRJ-1", "非法状态" as unknown as ProjectStatus)).rejects.toThrow(/不在枚举内/);
+  });
+
+  it("throws on HTTP 404 with backend error message", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: false, status: 404, statusText: "Not Found",
+      json: () => Promise.resolve({ error: "project not found" }),
+    }));
+    const q = new CRMQuery("/api");
+    await expect(q.updateProjectStatus("PRJ-ghost", "已关闭")).rejects.toThrow(/project not found/);
+  });
+
+  it("throws on network error", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
+    const q = new CRMQuery("/api");
+    await expect(q.updateProjectStatus("PRJ-1", "签约中")).rejects.toThrow(/网络错误/);
   });
 });

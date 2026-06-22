@@ -1,5 +1,6 @@
-import type { Project } from "@/query/types";
+import type { Project, ProjectStatus } from "@/query/types";
 import { formatDateTime, formatValue } from "../format";
+import { InlineStatusSelect } from "./InlineStatusSelect";
 
 // 商机信息列表
 // 列：项目名称 / 客户名称 / 意向等级 / 跟进状态 / 邮箱 / 负责人 / 备注说明 / 更新时间
@@ -7,11 +8,15 @@ import { formatDateTime, formatValue } from "../format";
 // - 数据列超长截断省略，title 属性展示完整内容供悬浮查看
 // - 客户名称列可点击，触发 onCustomerClick(customer_id) 跳转客户详情
 // - 客户名称为空（customer_id 找不到客户）时显示为不可点击的 "—"
+// - 跟进状态列：内联 <select>(InlineStatusSelect) 直接修改,onChange 立即 PATCH
+//   + 父组件 onStatusChange(id, newStatus) 处理 API + 本地更新
 export function ProjectTable({
-  projects, onCustomerClick,
+  projects, onCustomerClick, statusOptions, onStatusChange,
 }: {
   projects: Project[];
   onCustomerClick: (customerId: string) => void;
+  statusOptions: ReadonlyArray<{ value: ProjectStatus; label: string }>;
+  onStatusChange: (id: string, newStatus: ProjectStatus) => Promise<void>;
 }) {
   if (projects.length === 0) {
     return <div style={{ padding: 24, color: "var(--text-muted)" }}>暂无商机</div>;
@@ -55,7 +60,15 @@ export function ProjectTable({
                 )}
               </td>
               <td title={p.intent_level} style={truncatedCell}>{formatValue(p.intent_level)}</td>
-              <td title={p.status} style={truncatedCell}>{p.status}</td>
+              <td title={p.status} style={truncatedCell}>
+                <InlineStatusSelect
+                  value={p.status}
+                  options={statusOptions}
+                  onChange={async (newStatus) => {
+                    await onStatusChange(p.id, newStatus);
+                  }}
+                />
+              </td>
               <td title={p.customer_email} style={truncatedCell}>{formatValue(p.customer_email)}</td>
               <td title={p.assigned_to ?? ""} style={truncatedCell}>{formatValue(p.assigned_to)}</td>
               <td title={p.notes ?? ""} style={truncatedCell}>{formatValue(p.notes)}</td>

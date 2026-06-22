@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { CRMQuery } from "@/query";
-import type { Opportunity } from "@/query/types";
+import type { Opportunity, OpportunityStatus } from "@/query/types";
+import { OPPORTUNITY_STATUS_OPTIONS } from "@/query/types";
 import { OpportunityTable } from "../components/OpportunityTable";
 
 const q = new CRMQuery();
@@ -48,6 +49,13 @@ export function OpportunityList() {
     });
   }, [opps, search]);
 
+  // 内联状态修改:Table 通过 onStatusChange 调 PATCH,成功才更新本地 list
+  // 失败时 InlineStatusSelect 内部已展示错误,这里把 error throw 回去让 select 知道
+  const handleStatusChange = async (id: string, newStatus: OpportunityStatus) => {
+    await q.updateOpportunityStatus(id, newStatus);
+    setOpps((prev) => prev.map((o) => (o.id === id ? { ...o, status: newStatus } : o)));
+  };
+
   return (
     <div style={{ padding: 24 }}>
       <div style={{
@@ -88,6 +96,8 @@ export function OpportunityList() {
               <OpportunityTable
                 opportunities={filtered}
                 onCustomerClick={(customerId) => navigate(`/customers/${encodeURIComponent(customerId)}`)}
+                statusOptions={OPPORTUNITY_STATUS_OPTIONS}
+                onStatusChange={handleStatusChange}
               />
             )}
       </div>

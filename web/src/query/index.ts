@@ -8,7 +8,7 @@ import { fetchJSON, CRMFetchError } from "./loader";
 import type {
   Customer, Email, CustomerFilter, EmailFilter,
   IndexSummary, TimelineEvent, Site,
-  Project, Task, Opportunity,
+  Project, ProjectStatus, Task, TaskStatus, Opportunity, OpportunityStatus,
   WechatBindSubmitResult, WechatBindPollResult,
 } from "./types";
 
@@ -327,6 +327,21 @@ export class CRMQuery {
     return fetchJSON<Project[]>(`${this.base}/projects`);
   }
 
+  // 修改单个商机的跟进状态
+  // 请求：PATCH /api/projects/:id/status，body { status: <new> }
+  // 成功：{ ok: true, status: <new> }
+  // 失败：400 status 不在枚举内 / 404 项目不存在 / 500 后端 I/O 失败
+  // 抛出 CRMFetchError，message 来自 body.error
+  async updateProjectStatus(
+    id: string,
+    status: ProjectStatus,
+  ): Promise<{ ok: true; status: ProjectStatus }> {
+    return this.patchJSONRaw<{ ok: true; status: ProjectStatus }>(
+      `/projects/${encodeURIComponent(id)}/status`,
+      { status },
+    );
+  }
+
   // ===== 代办任务 =====
 
   // 列出全部代办任务（已 join 客户的 customer_name）。
@@ -335,6 +350,20 @@ export class CRMQuery {
   // customer_id 找不到 / 客户文件损坏 → 该条 customer_name 字段空字符串。
   async listTasks(): Promise<Task[]> {
     return fetchJSON<Task[]>(`${this.base}/tasks`);
+  }
+
+  // 修改单个任务的状态
+  // 请求：PATCH /api/tasks/:id/status，body { status: <new> }
+  // 成功：{ ok: true, status: <new> }
+  // 失败：400 status 不在枚举内 / 404 任务不存在 / 500 后端 I/O 失败
+  async updateTaskStatus(
+    id: string,
+    status: TaskStatus,
+  ): Promise<{ ok: true; status: TaskStatus }> {
+    return this.patchJSONRaw<{ ok: true; status: TaskStatus }>(
+      `/tasks/${encodeURIComponent(id)}/status`,
+      { status },
+    );
   }
 
   // ===== 公开信息 =====
@@ -348,6 +377,20 @@ export class CRMQuery {
     return fetchJSON<Opportunity[]>(`${this.base}/opportunities`);
   }
 
+  // 修改单个公开信息的状态
+  // 请求：PATCH /api/opportunities/:id/status，body { status: <new> }
+  // 成功：{ ok: true, status: <new> }
+  // 失败：400 status 不在枚举内 / 404 记录不存在 / 500 后端 I/O 失败
+  async updateOpportunityStatus(
+    id: string,
+    status: OpportunityStatus,
+  ): Promise<{ ok: true; status: OpportunityStatus }> {
+    return this.patchJSONRaw<{ ok: true; status: OpportunityStatus }>(
+      `/opportunities/${encodeURIComponent(id)}/status`,
+      { status },
+    );
+  }
+
   // 通用 JSON PATCH 辅助
   // - 用于 grading-rules / interest-level 这类"替换写 4 个 keys"端点
   // - 失败时从 body.error 提取 message（body 非 JSON 时退回 HTTP <status>）
@@ -355,6 +398,14 @@ export class CRMQuery {
     path: string,
     body: Record<string, string>,
   ): Promise<Record<string, string>> {
+    return this.patchJSONRaw<Record<string, string>>(path, body);
+  }
+
+  // 通用 JSON PATCH 辅助（带泛型 body / response）
+  // - 跟 loader.patchJSON 行为一致（失败抛 CRMFetchError，message 取 body.error）
+  // - 区别：拼上 base 前缀（base = API_BASE_URL by default）
+  // - 用途：updateXxxStatus 等需要传强类型 body / 拿强类型 response 的端点
+  private async patchJSONRaw<T>(path: string, body: unknown): Promise<T> {
     const fullPath = `${this.base}${path}`;
     let res: Response;
     try {
@@ -370,7 +421,7 @@ export class CRMQuery {
       const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
       throw new CRMFetchError(path, res.status, errBody?.error ?? `HTTP ${res.status}`);
     }
-    return (await res.json()) as Record<string, string>;
+    return (await res.json()) as T;
   }
 
   // 通用 multipart 上传辅助

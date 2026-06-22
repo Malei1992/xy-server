@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { CRMQuery } from "../../src/query";
-import type { Task } from "../../src/query/types";
+import type { Task, TaskStatus } from "../../src/query/types";
 
 // 正常任务：完整字段 + 已 join 客户
 const T1: Task = {
@@ -93,5 +93,64 @@ describe("CRMQuery.listTasks", () => {
     }));
     const q = new CRMQuery("/api");
     await expect(q.listTasks()).rejects.toThrow(/HTTP 500/);
+  });
+});
+
+describe("CRMQuery.updateTaskStatus", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("PATCHes /api/tasks/:id/status with the new status and returns ok payload", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 200, statusText: "OK",
+      json: () => Promise.resolve({ ok: true, status: "in_progress" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const q = new CRMQuery("/api");
+    const res = await q.updateTaskStatus("TASK-1", "in_progress");
+    expect(res).toEqual({ ok: true, status: "in_progress" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [calledUrl, calledInit] = fetchMock.mock.calls[0];
+    expect(calledUrl).toBe("/api/tasks/TASK-1/status");
+    expect(calledInit.method).toBe("PATCH");
+    expect(calledInit.headers["Content-Type"]).toBe("application/json");
+    expect(JSON.parse(calledInit.body)).toEqual({ status: "in_progress" });
+  });
+
+  it("encodes the id in the URL", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 200, statusText: "OK",
+      json: () => Promise.resolve({ ok: true, status: "resolved" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const q = new CRMQuery("/api");
+    await q.updateTaskStatus("TASK with space", "resolved");
+    const [calledUrl] = fetchMock.mock.calls[0];
+    expect(calledUrl).toBe("/api/tasks/TASK%20with%20space/status");
+  });
+
+  it("throws on HTTP 400 with backend error message", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: false, status: 400, statusText: "Bad Request",
+      json: () => Promise.resolve({ error: "status 不在枚举内" }),
+    }));
+    const q = new CRMQuery("/api");
+    await expect(q.updateTaskStatus("TASK-1", "invalid" as unknown as TaskStatus)).rejects.toThrow(/不在枚举内/);
+  });
+
+  it("throws on HTTP 404 with backend error message", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: false, status: 404, statusText: "Not Found",
+      json: () => Promise.resolve({ error: "task not found" }),
+    }));
+    const q = new CRMQuery("/api");
+    await expect(q.updateTaskStatus("TASK-ghost", "resolved")).rejects.toThrow(/task not found/);
+  });
+
+  it("throws on network error", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
+    const q = new CRMQuery("/api");
+    await expect(q.updateTaskStatus("TASK-1", "resolved")).rejects.toThrow(/网络错误/);
   });
 });

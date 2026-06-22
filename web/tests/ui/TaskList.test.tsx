@@ -1,12 +1,16 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { TaskList } from "@/ui/pages/TaskList";
 
-const { mockList } = vi.hoisted(() => ({ mockList: vi.fn() }));
+const { mockList, mockUpdateStatus } = vi.hoisted(() => ({
+  mockList: vi.fn(),
+  mockUpdateStatus: vi.fn(),
+}));
 vi.mock("@/query", () => ({
   CRMQuery: vi.fn().mockImplementation(() => ({
     listTasks: mockList,
+    updateTaskStatus: mockUpdateStatus,
   })),
 }));
 
@@ -220,5 +224,48 @@ describe("TaskList", () => {
       expect(screen.queryByText("合规文件缺失：泰国 BOI")).not.toBeInTheDocument();
       expect(screen.getByText("LLM 调用失败")).toBeInTheDocument();
     });
+  });
+});
+
+describe("TaskList 内联状态修改", () => {
+  beforeEach(() => {
+    mockUpdateStatus.mockReset();
+    mockList.mockReset();
+  });
+
+  it("status 列渲染 InlineStatusSelect(<select> per row),value 是英文 enum", async () => {
+    mockList.mockResolvedValue([T1, T2]);
+    render(<MemoryRouter><TaskList /></MemoryRouter>);
+    await waitFor(() => screen.getByText("Siam Cement"));
+    const selects = screen.getAllByTestId("status-select") as HTMLSelectElement[];
+    expect(selects).toHaveLength(2);
+    expect(selects[0].value).toBe("pending");
+    expect(selects[1].value).toBe("resolved");
+  });
+
+  it("改 status select → 调 updateTaskStatus + 列表该行 status 更新", async () => {
+    mockUpdateStatus.mockResolvedValue({ ok: true, status: "in_progress" });
+    mockList.mockResolvedValue([T1]);
+    render(<MemoryRouter><TaskList /></MemoryRouter>);
+    await waitFor(() => screen.getByText("Siam Cement"));
+    fireEvent.change(screen.getByTestId("status-select"), { target: { value: "in_progress" } });
+    await waitFor(() => {
+      expect(mockUpdateStatus).toHaveBeenCalledWith("TASK-1", "in_progress");
+    });
+    await waitFor(() => {
+      expect((screen.getByTestId("status-select") as HTMLSelectElement).value).toBe("in_progress");
+    });
+  });
+
+  it("失败时 select 还原原值 + InlineStatusSelect 自身展示错误", async () => {
+    mockUpdateStatus.mockRejectedValue(new Error("HTTP 400 status 不在枚举内"));
+    mockList.mockResolvedValue([T1]);
+    render(<MemoryRouter><TaskList /></MemoryRouter>);
+    await waitFor(() => screen.getByText("Siam Cement"));
+    fireEvent.change(screen.getByTestId("status-select"), { target: { value: "resolved" } });
+    await waitFor(() => {
+      expect(screen.getByTestId("status-select-error")).toHaveTextContent(/不在枚举内/);
+    });
+    expect((screen.getByTestId("status-select") as HTMLSelectElement).value).toBe("pending");
   });
 });

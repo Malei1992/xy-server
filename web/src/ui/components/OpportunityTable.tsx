@@ -1,5 +1,6 @@
-import type { Opportunity } from "@/query/types";
+import type { Opportunity, OpportunityStatus } from "@/query/types";
 import { formatValue } from "../format";
+import { InlineStatusSelect } from "./InlineStatusSelect";
 
 // 公开信息列表
 // 列：名称 / 详情 / 信息来源 / 来源类型 / 状态 / 客户名称 / 说明
@@ -9,12 +10,14 @@ import { formatValue } from "../format";
 // - 客户名称列：customer_id 存在 + customer_name 非空 → 可点击按钮跳转；
 //               否则显示 "—"
 // - 名称 / 详情 / 说明 缺失值（undefined / ""）显示 "无"（由 formatValue 处理）
-// - 来源类型 / 状态：后端已返回中文字面，原样展示
+// - 状态列：内联 <select>(InlineStatusSelect) 直接修改,onChange 立即 PATCH
 export function OpportunityTable({
-  opportunities, onCustomerClick,
+  opportunities, onCustomerClick, statusOptions, onStatusChange,
 }: {
   opportunities: Opportunity[];
   onCustomerClick: (customerId: string) => void;
+  statusOptions: ReadonlyArray<{ value: OpportunityStatus; label: string }>;
+  onStatusChange: (id: string, newStatus: OpportunityStatus) => Promise<void>;
 }) {
   if (opportunities.length === 0) {
     return <div style={{ padding: 24, color: "var(--text-muted)" }}>暂无公开信息</div>;
@@ -60,7 +63,15 @@ export function OpportunityTable({
                 )}
               </td>
               <td title={o.source_type} style={truncatedCell}>{o.source_type}</td>
-              <td title={o.status} style={truncatedCell}>{o.status}</td>
+              <td title={o.status} style={truncatedCell}>
+                <InlineStatusSelect
+                  value={o.status}
+                  options={statusOptions}
+                  onChange={async (newStatus) => {
+                    await onStatusChange(o.id, newStatus);
+                  }}
+                />
+              </td>
               <td
                 title={customerName}
                 style={truncatedCell}

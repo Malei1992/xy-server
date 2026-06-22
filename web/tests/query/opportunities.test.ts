@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { CRMQuery } from "../../src/query";
-import type { Opportunity } from "../../src/query/types";
+import type { Opportunity, OpportunityStatus } from "../../src/query/types";
 
 // 正常商机：完整字段 + 已 join 客户
 const O1: Opportunity = {
@@ -91,5 +91,64 @@ describe("CRMQuery.listOpportunities", () => {
     }));
     const q = new CRMQuery("/api");
     await expect(q.listOpportunities()).rejects.toThrow(/HTTP 500/);
+  });
+});
+
+describe("CRMQuery.updateOpportunityStatus", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("PATCHes /api/opportunities/:id/status with the new status and returns ok payload", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 200, statusText: "OK",
+      json: () => Promise.resolve({ ok: true, status: "跟进中" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const q = new CRMQuery("/api");
+    const res = await q.updateOpportunityStatus("OPP-1", "跟进中");
+    expect(res).toEqual({ ok: true, status: "跟进中" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [calledUrl, calledInit] = fetchMock.mock.calls[0];
+    expect(calledUrl).toBe("/api/opportunities/OPP-1/status");
+    expect(calledInit.method).toBe("PATCH");
+    expect(calledInit.headers["Content-Type"]).toBe("application/json");
+    expect(JSON.parse(calledInit.body)).toEqual({ status: "跟进中" });
+  });
+
+  it("encodes the id in the URL", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 200, statusText: "OK",
+      json: () => Promise.resolve({ ok: true, status: "已转化" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const q = new CRMQuery("/api");
+    await q.updateOpportunityStatus("OPP with space", "已转化");
+    const [calledUrl] = fetchMock.mock.calls[0];
+    expect(calledUrl).toBe("/api/opportunities/OPP%20with%20space/status");
+  });
+
+  it("throws on HTTP 400 with backend error message", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: false, status: 400, statusText: "Bad Request",
+      json: () => Promise.resolve({ error: "status 不在枚举内" }),
+    }));
+    const q = new CRMQuery("/api");
+    await expect(q.updateOpportunityStatus("OPP-1", "非法状态" as unknown as OpportunityStatus)).rejects.toThrow(/不在枚举内/);
+  });
+
+  it("throws on HTTP 404 with backend error message", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: false, status: 404, statusText: "Not Found",
+      json: () => Promise.resolve({ error: "opportunity not found" }),
+    }));
+    const q = new CRMQuery("/api");
+    await expect(q.updateOpportunityStatus("OPP-ghost", "已关闭")).rejects.toThrow(/opportunity not found/);
+  });
+
+  it("throws on network error", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
+    const q = new CRMQuery("/api");
+    await expect(q.updateOpportunityStatus("OPP-1", "已转化")).rejects.toThrow(/网络错误/);
   });
 });

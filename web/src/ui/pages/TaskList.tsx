@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { CRMQuery } from "@/query";
 import type { Task, TaskStatus, TaskPriority } from "@/query/types";
+import { TASK_STATUS_OPTIONS } from "@/query/types";
 import { TaskTable } from "../components/TaskTable";
 
 const q = new CRMQuery();
@@ -69,6 +70,14 @@ export function TaskList() {
       return true;
     });
   }, [tasks, search, statusFilter, priorityFilter]);
+
+  // 内联状态修改:Table 通过 onStatusChange 调 PATCH,成功才更新本地 list
+  // 失败时 InlineStatusSelect 内部已展示错误,这里把 error throw 回去让 select 知道
+  // 发 API 用英文 enum(API 传输),UI 显示中文 label(由 InlineStatusSelect + TASK_STATUS_OPTIONS 处理)
+  const handleStatusChange = async (id: string, newStatus: TaskStatus) => {
+    await q.updateTaskStatus(id, newStatus);
+    setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, status: newStatus } : t)));
+  };
 
   const selectStyle: React.CSSProperties = {
     padding: "6px 10px",
@@ -141,6 +150,8 @@ export function TaskList() {
               <TaskTable
                 tasks={filtered}
                 onCustomerClick={(customerId) => navigate(`/customers/${encodeURIComponent(customerId)}`)}
+                statusOptions={TASK_STATUS_OPTIONS}
+                onStatusChange={handleStatusChange}
               />
             )}
       </div>

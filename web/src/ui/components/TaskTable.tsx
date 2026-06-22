@@ -1,9 +1,10 @@
-import type { Task } from "@/query/types";
+import type { Task, TaskStatus } from "@/query/types";
 import {
   formatDateTime, formatValue,
-  formatTaskType, formatTaskStatus,
+  formatTaskType,
 } from "../format";
 import { PriorityBadge } from "./PriorityBadge";
+import { InlineStatusSelect } from "./InlineStatusSelect";
 
 // 代办任务列表
 // 列：任务标题 / 任务类型 / 任务等级 / 任务状态 / 客户名称 / 详细说明 /
@@ -12,14 +13,17 @@ import { PriorityBadge } from "./PriorityBadge";
 // - 客户名称列：customer_id 存在 + customer_name 非空 → 可点击按钮跳转；
 //               否则显示 "—"
 // - 任务等级列：圆形徽章（PriorityBadge），P0 红 / P1 黄 / P2 绿 / P3 灰
-// - 任务类型 / 任务状态：cell 展示中文字面（formatTaskType / formatTaskStatus），
-//                       title 属性展示原始 enum 方便对照
-// - 空字段（undefined / ""）一律显示 "无"（由 formatValue / formatTaskType/Status 处理）
+// - 任务类型：cell 展示中文字面（formatTaskType），title 属性展示原始 enum
+// - 任务状态列：内联 <select>(InlineStatusSelect) 直接修改；value 用英文 enum,
+//   label 是中文,select 自动按 label 渲染(由 InlineStatusSelect + TASK_STATUS_OPTIONS 处理)
+// - 空字段（undefined / ""）一律显示 "无"（由 formatValue / formatTaskType 处理）
 export function TaskTable({
-  tasks, onCustomerClick,
+  tasks, onCustomerClick, statusOptions, onStatusChange,
 }: {
   tasks: Task[];
   onCustomerClick: (customerId: string) => void;
+  statusOptions: ReadonlyArray<{ value: TaskStatus; label: string }>;
+  onStatusChange: (id: string, newStatus: TaskStatus) => Promise<void>;
 }) {
   if (tasks.length === 0) {
     return <div style={{ padding: 24, color: "var(--text-muted)" }}>暂无代办任务</div>;
@@ -48,7 +52,15 @@ export function TaskTable({
               <td title={t.title} style={truncatedCell}>{t.title}</td>
               <td title={t.type} style={truncatedCell}>{formatTaskType(t.type)}</td>
               <td style={truncatedCell}><PriorityBadge priority={t.priority} /></td>
-              <td title={t.status} style={truncatedCell}>{formatTaskStatus(t.status)}</td>
+              <td title={t.status} style={truncatedCell}>
+                <InlineStatusSelect
+                  value={t.status}
+                  options={statusOptions}
+                  onChange={async (newStatus) => {
+                    await onStatusChange(t.id, newStatus);
+                  }}
+                />
+              </td>
               <td
                 title={customerName}
                 style={truncatedCell}

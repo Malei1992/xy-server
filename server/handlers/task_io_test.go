@@ -2,10 +2,13 @@ package handlers
 
 // 本文件：task_io.go 的单元测试。
 // 覆盖 ReadTasks：缺目录 / 空目录 / 多文件 / 损坏文件 / 非 .json 文件 / 子目录 / 空文件 / 中文 round-trip。
+// 覆盖 WriteTask：创建新文件 / 覆盖旧文件 / 并发写不损坏。
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -214,6 +217,124 @@ func TestReadTasksEmptyWhenAllNonTASK(t *testing.T) {
 	}
 	if len(tasks) != 0 {
 		t.Errorf("want 0, got %d: %v", len(tasks), tasks)
+	}
+}
+
+// ===== WriteTask 原子写 + mutex 保护 =====
+
+// 11. 写一个新文件 → 读出来字段对得上
+func TestWriteTask_CreatesNewFile(t *testing.T) {
+	dir := t.TempDir()
+	task := Task{
+		ID:        "TASK-1",
+		Title:     "任务1",
+		Type:      "compliance_blocked",
+		Priority:  "P1",
+		Status:    "pending",
+		UpdatedAt: "2026-06-22T10:00:00Z",
+	}
+
+	if err := WriteTask(dir, task); err != nil {
+		t.Fatalf("WriteTask: %v", err)
+	}
+
+	tasks, err := ReadTasks(dir)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("want 1, got %d", len(tasks))
+	}
+	if tasks[0].ID != "TASK-1" {
+		t.Errorf("id = %q, want TASK-1", tasks[0].ID)
+	}
+	if tasks[0].Status != "pending" {
+		t.Errorf("status = %q, want pending", tasks[0].Status)
+	}
+	if tasks[0].Title != "任务1" {
+		t.Errorf("title = %q, want 任务1", tasks[0].Title)
+	}
+}
+
+// 12. 覆盖已存在的文件 → 新内容生效
+func TestWriteTask_OverwritesExisting(t *testing.T) {
+	dir := t.TempDir()
+	old := Task{ID: "TASK-1", Title: "旧", Type: "compliance_blocked", Priority: "P1", Status: "pending", UpdatedAt: "2026-06-15T10:00:00Z"}
+	if err := WriteTask(dir, old); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	newTask := Task{ID: "TASK-1", Title: "新", Type: "compliance_blocked", Priority: "P1", Status: "resolved", UpdatedAt: "2026-06-22T10:00:00Z"}
+	if err := WriteTask(dir, newTask); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+
+	tasks, err := ReadTasks(dir)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("want 1, got %d", len(tasks))
+	}
+	if tasks[0].Status != "resolved" {
+		t.Errorf("status = %q, want resolved", tasks[0].Status)
+	}
+	if tasks[0].Title != "新" {
+		t.Errorf("title = %q, want 新", tasks[0].Title)
+	}
+}
+
+// 13. 并发写同一个 id 不会损坏文件(`-race` 配合看)
+func TestWriteTask_ConcurrentSameID(t *testing.T) {
+	dir := t.TempDir()
+	const goroutines = 8
+	const opsPerG = 25
+
+	statuses := []string{"pending", "in_progress", "resolved", "dismissed"}
+
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		g := g
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < opsPerG; i++ {
+				tk := Task{
+					ID:        "TASK-shared",
+					Type:      "compliance_blocked",
+					Priority:  "P1",
+					Status:    statuses[(g+i)%len(statuses)],
+					UpdatedAt: "2026-06-22T10:00:00Z",
+				}
+				if err := WriteTask(dir, tk); err != nil {
+					t.Errorf("WriteTask g=%d i=%d: %v", g, i, err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	data, err := os.ReadFile(filepath.Join(dir, "TASK-shared.json"))
+	if err != nil {
+		t.Fatalf("read final file: %v", err)
+	}
+	var tk Task
+	if err := json.Unmarshal(data, &tk); err != nil {
+		t.Fatalf("parse final file: %v; raw=%s", err, data)
+	}
+	if tk.ID != "TASK-shared" {
+		t.Errorf("id = %q, want TASK-shared", tk.ID)
+	}
+	valid := false
+	for _, s := range statuses {
+		if tk.Status == s {
+			valid = true
+			break
+		}
+	}
+	if !valid {
+		t.Errorf("status = %q, want one of %v", tk.Status, statuses)
 	}
 }
 

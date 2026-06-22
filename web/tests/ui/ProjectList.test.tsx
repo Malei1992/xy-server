@@ -1,12 +1,16 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { ProjectList } from "@/ui/pages/ProjectList";
 
-const { mockList } = vi.hoisted(() => ({ mockList: vi.fn() }));
+const { mockList, mockUpdateStatus } = vi.hoisted(() => ({
+  mockList: vi.fn(),
+  mockUpdateStatus: vi.fn(),
+}));
 vi.mock("@/query", () => ({
   CRMQuery: vi.fn().mockImplementation(() => ({
     listProjects: mockList,
+    updateProjectStatus: mockUpdateStatus,
   })),
 }));
 
@@ -156,5 +160,53 @@ describe("ProjectList", () => {
     const updatedCell = cells[cells.length - 1];
     expect(updatedCell.textContent).not.toBe("无");
     expect(updatedCell.textContent).toBeTruthy();
+  });
+});
+
+describe("ProjectList 内联状态修改", () => {
+  beforeEach(() => {
+    mockUpdateStatus.mockReset();
+    mockList.mockReset();
+  });
+
+  it("status 列渲染 InlineStatusSelect(<select> per row)", async () => {
+    mockList.mockResolvedValue([P1, P2]);
+    render(<MemoryRouter><ProjectList /></MemoryRouter>);
+    await waitFor(() => screen.getByText("华为泰国数据中心"));
+    const selects = screen.getAllByTestId("status-select") as HTMLSelectElement[];
+    expect(selects).toHaveLength(2);
+    expect(selects[0].value).toBe("谈判中");
+    expect(selects[1].value).toBe("跟进中");
+  });
+
+  it("改 status select → 调 updateProjectStatus + 列表该行 status 更新", async () => {
+    mockUpdateStatus.mockResolvedValue({ ok: true, status: "签约中" });
+    mockList.mockResolvedValue([P1]);
+    render(<MemoryRouter><ProjectList /></MemoryRouter>);
+    await waitFor(() => screen.getByText("华为泰国数据中心"));
+    const select = screen.getByTestId("status-select") as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: "签约中" } });
+    await waitFor(() => {
+      expect(mockUpdateStatus).toHaveBeenCalledWith("PRJ-1", "签约中");
+    });
+    // 列表该行 status 更新(select value 跟随 prop 变)
+    await waitFor(() => {
+      expect((screen.getByTestId("status-select") as HTMLSelectElement).value).toBe("签约中");
+    });
+  });
+
+  it("失败时 select 还原原值,InlineStatusSelect 自身展示错误", async () => {
+    mockUpdateStatus.mockRejectedValue(new Error("HTTP 400 status 不在枚举内"));
+    mockList.mockResolvedValue([P1]);
+    render(<MemoryRouter><ProjectList /></MemoryRouter>);
+    await waitFor(() => screen.getByText("华为泰国数据中心"));
+    fireEvent.change(screen.getByTestId("status-select"), { target: { value: "签约中" } });
+    await waitFor(() => {
+      expect(screen.getByTestId("status-select-error")).toHaveTextContent(/不在枚举内/);
+    });
+    // 列表该行 status 保持原值(select 回到 "谈判中")
+    expect((screen.getByTestId("status-select") as HTMLSelectElement).value).toBe("谈判中");
+    // PATCH 失败时,page 的 list state 不更新(因为 onStatusChange 抛了,page 不应改 list)
+    // InlineStatusSelect 内部把 error 显示在 select 下方
   });
 });
