@@ -471,17 +471,21 @@ describe("Settings 资料上传 section", () => {
     await waitFor(() => screen.getByTestId("upload-faq-input"));
 
     const input = screen.getByTestId("upload-faq-input") as HTMLInputElement;
-    // maxSizeMB = 10 → 上限 10 * 1024 * 1024 = 10485760
-    // 假 .docx：ZIP magic bytes (PK\x03\x04) 让 accept 后缀能通过
-    const oversizedBytes = new Uint8Array([0x50, 0x4B, 0x03, 0x04, ...new Array(11 * 1024 * 1024 - 4).fill(0)]);
-    const oversized = new File([oversizedBytes], "big.docx", {
+    // maxSizeMB = 100 → 上限 100 * 1024 * 1024 = 104857600
+    // 不实际分配 101MB(会 OOM),用最小合法 payload + 改写 size 属性触发客户端拦截
+    const tinyBytes = new Uint8Array([0x50, 0x4B, 0x03, 0x04]);
+    const oversized = new File([tinyBytes], "big.docx", {
       type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    });
+    Object.defineProperty(oversized, "size", {
+      value: 101 * 1024 * 1024,
+      configurable: true,
     });
     fireEvent.change(input, { target: { files: [oversized] } });
 
     await waitFor(() => {
       const body = document.body.textContent ?? "";
-      expect(body).toMatch(/大小|超限|10\s*MB|过大/);
+      expect(body).toMatch(/大小|超限|100\s*MB|过大/);
     });
     const uploadCalls = mockFetch.mock.calls.filter(
       (c) => typeof c[0] === "string" && c[0].includes("/uploads/"),

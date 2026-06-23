@@ -263,13 +263,13 @@ func TestUploadFaqTooShortForMagic(t *testing.T) {
 	}
 }
 
-// 7. 超大：>10 MiB → 413，且前缀是 ZIP magic 也照样拒
+// 7. 超大：>100 MiB → 413，且前缀是 ZIP magic 也照样拒
 func TestUploadFaqTooLarge(t *testing.T) {
 	crmDir := t.TempDir()
 	r := newUploadEngine(t, crmDir)
 
-	// 11 MiB：前 4 字节是合法 PK\x03\x04，但超过 10 MiB 上限
-	content := make([]byte, 11*1024*1024)
+	// 101 MiB：前 4 字节是合法 PK\x03\x04，但超过 100 MiB 上限
+	content := make([]byte, 101*1024*1024)
 	copy(content, []byte{0x50, 0x4B, 0x03, 0x04})
 	for i := 4; i < len(content); i++ {
 		content[i] = 'a'
@@ -536,8 +536,8 @@ func TestUploadAttachmentTooLarge(t *testing.T) {
 	crmDir := t.TempDir()
 	r := newUploadEngine(t, crmDir)
 
-	// 11 MiB，PDF magic 开头 + 后缀正确，但超过 10 MiB 上限
-	content := make([]byte, 11*1024*1024)
+	// 101 MiB，PDF magic 开头 + 后缀正确，但超过 100 MiB 上限
+	content := make([]byte, 101*1024*1024)
 	copy(content, []byte("%PDF-"))
 	for i := 5; i < len(content); i++ {
 		content[i] = 'a'

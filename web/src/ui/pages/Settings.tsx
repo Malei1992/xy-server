@@ -719,14 +719,14 @@ function UploadSection() {
       <UploadField
         title="FAQ"
         accept=".doc,.docx"
-        maxSizeMB={10}
+        maxSizeMB={100}
         endpoint="/api/uploads/faq"
         testId="upload-faq"
       />
       <UploadField
         title="外宣材料"
         accept=".pdf"
-        maxSizeMB={10}
+        maxSizeMB={100}
         endpoint="/api/uploads/attachment-moonstar"
         testId="upload-attachment-moonstar"
       />

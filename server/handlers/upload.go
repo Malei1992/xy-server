@@ -27,11 +27,11 @@ var (
 // maxBytes 内的"探针"读取窗口；超过窗口但总长也超 maxBytes 仍然判定为 413。
 // 实际最大限制由调用方在 saveUpload 传入。
 const (
-	// faqMaxBytes FAQ 最大 10 MiB
-	faqMaxBytes int64 = 10 * 1024 * 1024
+	// faqMaxBytes FAQ 最大 100 MiB
+	faqMaxBytes int64 = 100 * 1024 * 1024
 
-	// pdfMaxBytes 外宣材料最大 10 MiB
-	pdfMaxBytes int64 = 10 * 1024 * 1024
+	// pdfMaxBytes 外宣材料最大 100 MiB
+	pdfMaxBytes int64 = 100 * 1024 * 1024
 
 	// pdfMagic PDF 文件头魔数
 	pdfMagic = "%PDF-"
@@ -65,7 +65,7 @@ func saveUpload(c *gin.Context, fullPath string, validate func(data []byte, ext 
 		return ErrTooLarge
 	}
 
-	// 3) 读全部内容（小文件，10MiB 上限内 OK）
+	// 3) 读全部内容（小文件，100MiB 上限内 OK）
 	f, err := fh.Open()
 	if err != nil {
 		return err
@@ -152,7 +152,7 @@ func validateAttachmentMoonstar(data []byte, ext string) error {
 }
 
 // PostFaq FAQ 上传端点
-// 入参：multipart/form-data，字段名 file；必须是 ≤10MiB 的 .docx（ZIP magic 校验）
+// 入参：multipart/form-data，字段名 file；必须是 ≤100MiB 的 .docx（ZIP magic 校验）
 // 保存到 <crmDir>/<relPath>（relPath 来自 paths.go 常量，绝对路径前 crmDir 是根）。
 func PostFaq(crmDir, relPath string) gin.HandlerFunc {
 	fullPath := filepath.Join(crmDir, relPath)
